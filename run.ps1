@@ -28,3 +28,4 @@ if (-not (Test-Path -LiteralPath $entrypoint)) {
 }
 
 & $python $entrypoint
+# hello
