@@ -122,6 +122,8 @@ AUTHOR_AFFILIATION_PROMPT = (
     "- Read all author and affiliation blocks before linking. Use reading order,\n"
     "  adjacency, line breaks, and printed markers together as evidence.\n"
     "- Preserve the authors in the order they are printed. Separate each name from\n"
+    "  post-nominal degrees such as MD, PhD, and FACS; return those in a separate\n"
+    "  degrees field and keep them out of display_name, given_names, and surname.\n"
     "  adjacent affiliation markers. Hyphens may join given-name initials or parts\n"
     "  of a name; do not treat a final token such as J-Y or C-S as a surname solely\n"
     "  because it is last. If name order is unclear, preserve the display name and\n"
@@ -156,7 +158,7 @@ AUTHOR_AFFILIATION_PROMPT = (
     "{\n"
     '  "authors": [\n'
     '    {"display_name": "Jane Doe", "given_names": "Jane", "surname": "Doe", '
-    '"initials": "J.", "markers": ["1"], "affiliations": ["1"], "corresponding": false},\n'
+    '"initials": "J.", "degrees": "MD, PhD", "markers": ["1"], "affiliations": ["1"], "corresponding": false},\n'
     '    {"display_name": "John Smith", "given_names": "John", "surname": "Smith", '
     '"initials": "J.", "markers": ["2"], "affiliations": ["2"], "corresponding": false}\n'
     "  ],\n"

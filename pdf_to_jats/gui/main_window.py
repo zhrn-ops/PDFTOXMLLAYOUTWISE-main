@@ -8,7 +8,7 @@ import re
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal
+from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QKeySequence, QPalette, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -194,6 +194,7 @@ class MainWindow(QMainWindow):
         self._last_refine_report = None
         self._article_finish_thread = None
         self._article_finish_worker = None
+        self._pending_article_finish = None
         self._review_block_ids: list[str] = []
         self._review_index = -1
         self._finished_segment_keys: list[str] = []
@@ -1138,6 +1139,7 @@ class MainWindow(QMainWindow):
             metadata=dict(source.metadata),
         )
 
+    @Slot(str)
     def _log(self, message: str) -> None:
         log = getattr(self, "log", None)
         if log is None:
@@ -1872,12 +1874,9 @@ class MainWindow(QMainWindow):
         worker = _ArticleFinishWorker(self.openrouter_client, payload)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.progress.connect(self._log)
-        worker.finished.connect(
-            lambda result, error, article=dict(segment), article_key=key:
-                self._on_article_finish_complete(article, article_key, (result, output_path), error),
-            Qt.QueuedConnection,
-        )
+        worker.progress.connect(self._log, Qt.QueuedConnection)
+        self._pending_article_finish = (dict(segment), key, output_path)
+        worker.finished.connect(self._on_article_finish_worker_complete, Qt.QueuedConnection)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -1885,6 +1884,17 @@ class MainWindow(QMainWindow):
         self._article_finish_worker = worker
         self._set_article_finish_busy(True)
         thread.start()
+
+    @Slot(object, object)
+    def _on_article_finish_worker_complete(self, response, error) -> None:
+        """Handle worker results on the main GUI thread."""
+
+        pending = self._pending_article_finish
+        self._pending_article_finish = None
+        if pending is None:
+            return
+        segment, key, output_path = pending
+        self._on_article_finish_complete(segment, key, (response, output_path), error)
 
     def _set_article_finish_busy(self, busy: bool) -> None:
         for name in ("finish_article_btn", "finish_selection_btn", "classify_btn"):
@@ -2733,20 +2743,29 @@ class MainWindow(QMainWindow):
         if not linked.authors and not linked.affiliations:
             self._log("Author/affiliation parse returned no entries.")
             return False
+        model_author_count = len(linked.authors)
+        model_affiliation_count = len(linked.affiliations)
         expected_authors = len(segment_document.authors)
         expected_affiliations = len(segment_document.affiliations)
+        heuristic = self.linker.link_from_blocks(author_blocks, affiliation_blocks)
+        linked = self._merge_author_affiliation_results(linked, heuristic)
+        restored_authors = max(0, len(linked.authors) - model_author_count)
+        restored_affiliations = max(0, len(linked.affiliations) - model_affiliation_count)
+        if restored_authors or restored_affiliations:
+            self._log(
+                f"Layout parse filled {restored_authors} author(s) and "
+                f"{restored_affiliations} affiliation(s) missing from Qwen's response."
+            )
         if expected_authors and len(linked.authors) < expected_authors:
             self._log(
-                f"Author parse returned {len(linked.authors)} author(s), below the existing "
-                f"{expected_authors}; keeping the existing parse."
+                f"Combined author parse has {len(linked.authors)} author(s); the existing "
+                f"layout parse had {expected_authors}. Continuing with available author evidence."
             )
-            return False
         if expected_affiliations and len(linked.affiliations) < expected_affiliations:
             self._log(
-                f"Affiliation parse returned {len(linked.affiliations)} affiliation(s), "
-                f"below the existing {expected_affiliations}; keeping the existing parse."
+                f"Combined affiliation parse has {len(linked.affiliations)} affiliation(s); "
+                f"the existing layout parse had {expected_affiliations}."
             )
-            return False
         segment_document.authors = linked.authors
         segment_document.affiliations = linked.affiliations
         segment_document.corresponding_author = linked.corresponding_author
@@ -2761,6 +2780,94 @@ class MainWindow(QMainWindow):
             f"for article {segment.get('abstract_number', '')}."
         )
         return True
+
+    @staticmethod
+    def _merge_author_affiliation_results(primary: LinkedAuthors, fallback: LinkedAuthors) -> LinkedAuthors:
+        """Fill gaps in the model parse from layout parsing without discarding either."""
+
+        def key(value: str) -> str:
+            return re.sub(r"[^\w]", "", value.casefold())
+
+        affiliations = list(primary.affiliations)
+        by_text = {key(item.text): item for item in affiliations if key(item.text)}
+        by_marker = {
+            marker: item
+            for item in affiliations
+            for marker in ([item.marker] + list(item.markers))
+            if marker
+        }
+        id_map: dict[str, str] = {}
+        for candidate in fallback.affiliations:
+            existing = by_text.get(key(candidate.text))
+            if existing is None:
+                existing = next(
+                    (by_marker[marker] for marker in candidate.markers + [candidate.marker]
+                     if marker and marker in by_marker),
+                    None,
+                )
+            if existing is not None:
+                id_map[candidate.id] = existing.id
+                for marker in candidate.markers + [candidate.marker]:
+                    if marker and marker not in existing.markers:
+                        existing.markers.append(marker)
+                continue
+
+            # Avoid an ID collision when the model and heuristic used the same
+            # printed marker for different institution text.
+            added = replace(candidate)
+            if any(item.id == added.id for item in affiliations):
+                added.id = f"aff_{len(affiliations) + 1}"
+            id_map[candidate.id] = added.id
+            affiliations.append(added)
+            by_text[key(added.text)] = added
+            for marker in added.markers + [added.marker]:
+                if marker:
+                    by_marker.setdefault(marker, added)
+
+        authors = list(primary.authors)
+        author_by_key = {key(author.display_name): author for author in authors if key(author.display_name)}
+        for candidate in fallback.authors:
+            normalized = key(candidate.display_name)
+            existing = author_by_key.get(normalized)
+            if existing is None and candidate.surname:
+                # Handle minor punctuation or middle-initial differences while
+                # avoiding surname-only matches between different people.
+                surname = key(candidate.surname)
+                given = key(candidate.given_names)
+                existing = next(
+                    (author for author in authors
+                     if key(author.surname) == surname
+                     and (not given or not author.given_names
+                          or key(author.given_names)[0] == given[0])),
+                    None,
+                )
+            mapped_ids = [id_map.get(value, value) for value in candidate.affiliation_ids]
+            if existing is None:
+                added = replace(candidate, affiliation_ids=list(mapped_ids), markers=list(candidate.markers))
+                added.id = f"author_{len(authors) + 1}"
+                authors.append(added)
+                author_by_key[normalized] = added
+            else:
+                for affiliation_id in mapped_ids:
+                    if affiliation_id not in existing.affiliation_ids:
+                        existing.affiliation_ids.append(affiliation_id)
+                if candidate.degrees and not existing.degrees:
+                    existing.degrees = candidate.degrees
+                elif candidate.degrees:
+                    current_degrees = {value.strip().casefold() for value in existing.degrees.split(",")}
+                    additions = [
+                        value.strip() for value in candidate.degrees.split(",")
+                        if value.strip() and value.strip().casefold() not in current_degrees
+                    ]
+                    if additions:
+                        existing.degrees = ", ".join(filter(None, (existing.degrees, *additions)))
+
+        return LinkedAuthors(
+            authors=authors,
+            affiliations=affiliations,
+            corresponding_author=primary.corresponding_author or fallback.corresponding_author,
+            issues=list(primary.issues) + list(fallback.issues),
+        )
 
     @staticmethod
     def _author_affiliation_payload(segment_document: Document) -> dict[str, object]:

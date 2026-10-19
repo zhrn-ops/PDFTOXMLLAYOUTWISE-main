@@ -351,6 +351,8 @@ class PDFViewer(QWidget):
         self._doc: fitz.Document | None = None
         self._page_index = 0
         self._page_scale = 1.6
+        self._page_labels: list[PdfPageLabel] = []
+        self._relaying_page_signal = False
         self._blocks: list[dict[str, Any]] = []
         self._zones: list[dict[str, Any]] = []
         self._regions: list[dict[str, Any]] = []
@@ -371,39 +373,170 @@ class PDFViewer(QWidget):
         controls.addWidget(self.next_btn)
         controls.addWidget(self.zoom_out_btn)
         controls.addWidget(self.zoom_in_btn)
+        self.page_indicator = QLabel("Page 0 of 0")
+        controls.addWidget(self.page_indicator)
         controls.addStretch(1)
         layout.addLayout(controls)
         self.label = PdfPageLabel("Drop a PDF to preview it here.")
         self.label.setWordWrap(True)
-        area = QScrollArea()
-        area.setWidgetResizable(True)
-        area.setWidget(self.label)
-        layout.addWidget(area)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(False)
+        self.page_container = QWidget()
+        self.page_layout = QVBoxLayout(self.page_container)
+        self.page_layout.setContentsMargins(8, 8, 8, 8)
+        self.page_layout.setSpacing(12)
+        self.page_layout.addWidget(self.label, 0, Qt.AlignHCenter)
+        self.scroll_area.setWidget(self.page_container)
+        layout.addWidget(self.scroll_area)
+        self.prev_btn.hide()
+        self.next_btn.hide()
         self.prev_btn.clicked.connect(self.previous_page)
         self.next_btn.clicked.connect(self.next_page)
         self.zoom_out_btn.clicked.connect(lambda: self.set_zoom(max(self._page_scale - 0.2, 0.6)))
         self.zoom_in_btn.clicked.connect(lambda: self.set_zoom(min(self._page_scale + 0.2, 4.0)))
         self.label.setProperty("pageScale", self._page_scale)
+        self._page_labels = [self.label]
+        self._forward_page_signals(self.label, 0)
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
+
+    def _forward_page_signals(self, page_label: PdfPageLabel, page_index: int) -> None:
+        """Relay clicks and edits from every page through the original label."""
+
+        for name in (
+            "blockSelected", "blockRangeSelected", "blocksRectSelected",
+            "blockContextRequested", "blockMoved", "blockEditFinished",
+            "zoneSelected", "zoneMoved", "zoneCreated", "zoneEditFinished",
+        ):
+            signal = getattr(page_label, name)
+            if page_label is self.label:
+                signal.connect(
+                    lambda *_args: self._set_active_page(0)
+                    if not self._relaying_page_signal else None
+                )
+            else:
+                signal.connect(
+                    lambda *args, index=page_index, signal_name=name:
+                    self._relay_page_signal(index, signal_name, *args)
+                )
+
+    def _relay_page_signal(self, page_index: int, signal_name: str, *args) -> None:
+        self._set_active_page(page_index)
+        self._relaying_page_signal = True
+        try:
+            getattr(self.label, signal_name).emit(*args)
+        finally:
+            self._relaying_page_signal = False
+
+    def _set_active_page(self, page_index: int) -> None:
+        self._page_index = page_index
+        if self._doc is not None:
+            self.page_indicator.setText(f"Page {page_index + 1} of {self._doc.page_count}")
+
+    def _resize_page_labels(self) -> None:
+        if self._doc is None:
+            return
+        for index, label in enumerate(self._page_labels):
+            page = self._doc.load_page(index)
+            width = max(1, round(page.rect.width * self._page_scale))
+            height = max(1, round(page.rect.height * self._page_scale))
+            label.setFixedSize(width, height)
+            label.setProperty("pageScale", self._page_scale)
+        self.page_layout.activate()
+        content_width = max((label.width() for label in self._page_labels), default=1) + 16
+        content_height = (
+            sum(label.height() for label in self._page_labels)
+            + self.page_layout.spacing() * max(0, len(self._page_labels) - 1)
+            + 16
+        )
+        self.page_container.setMinimumSize(0, 0)
+        self.page_container.setMinimumSize(content_width, content_height)
+        self.page_container.resize(content_width, content_height)
+
+    def _sync_page_properties(self) -> None:
+        for label in self._page_labels:
+            label.setProperty("pageScale", self._page_scale)
+            label.setProperty("blocks", self._blocks)
+            label.setProperty("zones", self._zones)
+            label.setProperty("selectedZoneId", self._selected_zone_id)
+            label.setProperty("selectedZoneIds", self._selected_zone_ids)
+
+    def _render_visible_pages(self, force: bool = True) -> None:
+        if self._doc is None:
+            return
+        self._sync_page_properties()
+        scroll_top = self.scroll_area.verticalScrollBar().value()
+        scroll_bottom = scroll_top + max(1, self.scroll_area.viewport().height())
+        for index, label in enumerate(self._page_labels):
+            page_top = label.y()
+            page_bottom = page_top + label.height()
+            margin = label.height()
+            if page_bottom < scroll_top - margin or page_top > scroll_bottom + margin:
+                if force:
+                    label.clear()
+                    label.setProperty("renderedPageScale", None)
+                continue
+            if not force and label.property("renderedPageScale") == self._page_scale:
+                continue
+            page = self._doc.load_page(index)
+            pix = page.get_pixmap(matrix=fitz.Matrix(self._page_scale, self._page_scale), alpha=False)
+            image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
+            self._paint_overlays(QPixmap.fromImage(image), label, index)
+            label.setProperty("renderedPageScale", self._page_scale)
+
+    def _on_scroll_changed(self, _value: int) -> None:
+        if self._doc is None or not self._page_labels:
+            return
+        marker_y = self.scroll_area.verticalScrollBar().value() + max(1, self.scroll_area.viewport().height() // 3)
+        visible_index = self._page_index
+        for index, label in enumerate(self._page_labels):
+            if label.y() <= marker_y < label.y() + label.height():
+                visible_index = index
+                break
+        self._page_index = visible_index
+        self.page_indicator.setText(f"Page {visible_index + 1} of {self._doc.page_count}")
+        self._render_visible_pages(force=False)
 
     def load_pdf(self, pdf_path: str | Path) -> None:
+        if self._doc is not None:
+            self._doc.close()
         self._pdf_path = Path(pdf_path)
         self._doc = fitz.open(self._pdf_path)
         self._page_index = 0
+        while self.page_layout.count():
+            item = self.page_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None and widget is not self.label:
+                widget.deleteLater()
+        self.label.clear()
+        self.label.show()
+        self._page_labels = [self.label]
+        for page_index in range(1, self._doc.page_count):
+            page_label = PdfPageLabel(parent=self.page_container)
+            self._page_labels.append(page_label)
+            self._forward_page_signals(page_label, page_index)
+        for page_label in self._page_labels:
+            self.page_layout.addWidget(page_label, 0, Qt.AlignHCenter)
+        self._resize_page_labels()
+        self.page_indicator.setText(f"Page 1 of {self._doc.page_count}")
+        self.scroll_area.verticalScrollBar().setValue(0)
         self.render_page(0)
 
     def render_page(self, page_index: int) -> None:
         if self._doc is None or self._doc.page_count == 0:
             return
         page_index = max(0, min(page_index, self._doc.page_count - 1))
+        previous_page = self._page_index
         self._page_index = page_index
-        page = self._doc.load_page(page_index)
-        pix = page.get_pixmap(matrix=fitz.Matrix(self._page_scale, self._page_scale), alpha=False)
-        image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
-        self._paint_overlays(QPixmap.fromImage(image))
+        self._render_visible_pages()
+        if page_index != previous_page:
+            label = self._page_labels[page_index]
+            target_y = label.mapTo(self.page_container, label.rect().topLeft()).y()
+            self.scroll_area.verticalScrollBar().setValue(target_y)
+        self.page_indicator.setText(f"Page {self._page_index + 1} of {self._doc.page_count}")
 
     def set_zoom(self, scale: float) -> None:
         self._page_scale = scale
-        self.label.setProperty("pageScale", self._page_scale)
+        self._resize_page_labels()
         self.render_page(self._page_index)
 
     def next_page(self) -> None:
@@ -431,16 +564,18 @@ class PDFViewer(QWidget):
     def set_selected_zone(self, zone_id: str | None) -> None:
         self._selected_zone_id = zone_id
         self._selected_zone_ids = {zone_id} if zone_id else set()
-        self.label.setProperty("selectedZoneId", self._selected_zone_id)
-        self.label.setProperty("selectedZoneIds", self._selected_zone_ids)
+        for label in self._page_labels:
+            label.setProperty("selectedZoneId", self._selected_zone_id)
+            label.setProperty("selectedZoneIds", self._selected_zone_ids)
         if self._doc is not None:
             self.render_page(self._page_index)
 
     def set_selected_zones(self, zone_ids: set[str], primary_zone_id: str | None = None) -> None:
         self._selected_zone_ids = set(zone_ids)
         self._selected_zone_id = primary_zone_id if primary_zone_id in self._selected_zone_ids else next(iter(self._selected_zone_ids), None)
-        self.label.setProperty("selectedZoneId", self._selected_zone_id)
-        self.label.setProperty("selectedZoneIds", self._selected_zone_ids)
+        for label in self._page_labels:
+            label.setProperty("selectedZoneId", self._selected_zone_id)
+            label.setProperty("selectedZoneIds", self._selected_zone_ids)
         if self._doc is not None:
             self.render_page(self._page_index)
 
@@ -494,7 +629,7 @@ class PDFViewer(QWidget):
                 return bool(metadata.get("grouped_from_lines")) and not bool(metadata.get("is_paragraph_unit"))
         return False
 
-    def _paint_overlays(self, pixmap: QPixmap) -> None:
+    def _paint_overlays(self, pixmap: QPixmap, label: PdfPageLabel, page_index: int) -> None:
         if self._doc is None:
             return
         self._regions = []
@@ -513,7 +648,7 @@ class PDFViewer(QWidget):
         handle_brush = QColor(234, 88, 12, 150)
         visible_block_rects: dict[str, fitz.Rect] = {}
         for block in self._blocks:
-            if int(block.get("page", 0)) != self._page_index + 1:
+            if int(block.get("page", 0)) != page_index + 1:
                 continue
             bbox = block.get("bbox") or [0, 0, 0, 0]
             rect = fitz.Rect(bbox)
@@ -559,7 +694,7 @@ class PDFViewer(QWidget):
                         }
                     )
         for zone in self._zones:
-            if int(zone.get("page", 0)) != self._page_index + 1:
+            if int(zone.get("page", 0)) != page_index + 1:
                 continue
             bbox = zone.get("bbox") or [0, 0, 0, 0]
             zone_id = str(zone.get("id"))
@@ -640,5 +775,5 @@ class PDFViewer(QWidget):
                 ]
                 painter.drawPolygon(points)
         painter.end()
-        self.label.setProperty("blockRegions", self._regions)
-        self.label.setPixmap(pixmap)
+        label.setProperty("blockRegions", self._regions)
+        label.setPixmap(pixmap)

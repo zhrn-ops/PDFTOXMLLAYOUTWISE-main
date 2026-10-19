@@ -16,3 +16,4 @@ class Author:
     affiliation_ids: list[str] = field(default_factory=list)
     id: str = ""
     markers: list[str] = field(default_factory=list)
+    degrees: str = ""

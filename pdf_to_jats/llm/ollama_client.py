@@ -1,4 +1,4 @@
-"""Ollama client using its OpenAI-compatible chat completions endpoint."""
+"""Ollama client using its native chat API."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import urllib.request
 @dataclass(slots=True)
 class OllamaClient:
     model: str = "qwen3:8b"
-    base_url: str = "http://localhost:11434/v1"
+    base_url: str = "http://localhost:11434"
     timeout_seconds: float = 120.0
 
     def classify(self, prompt: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -22,19 +22,23 @@ class OllamaClient:
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
-                "temperature": 0.0,
+                # Qwen3's default reasoning mode can spend a long time thinking
+                # before returning this short extraction result. Disable it for
+                # structured metadata parsing and ask Ollama for JSON directly.
+                "think": False,
+                "format": "json",
+                "options": {"temperature": 0.0, "num_predict": 4096},
                 "stream": False,
             }
         ).encode("utf-8")
         request = urllib.request.Request(
-            f"{self.base_url.rstrip('/')}/chat/completions",
+            f"{self.base_url.rstrip('/')}/api/chat",
             data=body,
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
             raw = json.loads(response.read().decode("utf-8"))
-        choices = raw.get("choices") or []
-        text = ((choices[0].get("message") or {}).get("content") or "") if choices else ""
+        text = ((raw.get("message") or {}).get("content") or "")
         if isinstance(text, list):
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
         if not text.strip():

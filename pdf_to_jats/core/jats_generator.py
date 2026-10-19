@@ -136,6 +136,8 @@ class JATSGenerator:
                     initials, surname = self._split_name(author.display_name or f"{author.initials} {author.surname}".strip())
                 etree.SubElement(author_el, self._qname("initials", self.CE_NS)).text = initials
                 etree.SubElement(author_el, self._qname("surname", self.CE_NS)).text = surname
+                if author.degrees.strip():
+                    etree.SubElement(author_el, self._qname("degrees", self.CE_NS)).text = self._sanitize_xml_text(author.degrees)
             if affiliation is not None:
                 affiliation_el = etree.SubElement(author_group, self._qname("affiliation"))
                 self._append_affiliation_text(affiliation_el, affiliation.text)

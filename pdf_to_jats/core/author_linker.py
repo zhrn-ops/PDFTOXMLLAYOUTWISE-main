@@ -40,14 +40,14 @@ _SURNAME_MARKER_AUTHOR = re.compile(
 
 # "Sarah Smith, Bucknell University" — journal PDFs often embed the
 # institution directly in the author line instead of a numbered list.
-_AUTHOR_INSTITUTION_SPLIT = re.compile(r",\s*(?=(?:[A-Z][A-Za-z'’\-]+\s+){0,3}(?:University|Universit\u00e4t|Institute|Institut|Hospital|College|Center|Centre|School|Laborator|Foundation|Department|Academy))")
+_AUTHOR_INSTITUTION_SPLIT = re.compile(r",\s*(?=(?:[A-Z][A-Za-z\u00c0-\u024f'\u2019\-]+\s+){0,3}(?:University|Universit\u00e4t|Universidad|Institute|Institut|Hospital|College|Center|Centre|School|Laborator|Foundation|Fundaci(?:o|\u00f3)n|Department|Academy))", re.IGNORECASE)
 
 # Institution vocabulary: text carrying any of these is never a personal name,
 # so a wrapped affiliation tail cannot become an "author" called
 # "Headache Center" when its line is treated as an address.
 _INSTITUTION_WORDS = re.compile(
-    r"\b(?:university|universit\u00e4t|institute|hospital|college|center|centre|school|"
-    r"laborator|foundation|department|academy|medical|clinic|health|society|association)\b",
+    r"\b(?:university|universit\u00e4t|universidad|institute|hospital|college|center|centre|school|"
+    r"laborator|foundation|fundaci(?:o|\u00f3)n|department|academy|medical|clinic|health|society|association)\b",
     re.IGNORECASE,
 )
 
@@ -70,6 +70,12 @@ _SYMBOL_MARKERS = "*†‡§¶#"
 
 _MARKER_ATOM = rf"(?:\d{{1,3}}|[{re.escape(_SYMBOL_MARKERS)}]+|[A-Za-z])"
 _MARKER_RUN = rf"(?:{_MARKER_ATOM})(?:\s*[,\-\u2013]\s*(?:{_MARKER_ATOM}))*"
+_DEGREE_TOKEN = r"(?:ph\.?\s*d|m\.?d|m\.?s(?:c)?|b\.?s(?:c)?|d\.?phil|m\.?b\.?b\.?s|d\.?v\.?m|m\.?b\.?a|facs|r\.?n|m\.?p\.?h)\.?"
+_DEGREE_END = re.compile(
+    rf"(?:,\s*|\s+)(?P<degrees>{_DEGREE_TOKEN}(?:\s*,\s*{_DEGREE_TOKEN})*)"
+    rf"\s*(?P<markers>{_MARKER_RUN})?\s*$",
+    re.IGNORECASE,
+)
 
 # Digits or symbols glued to the end of a name: "Farias20", "Doe*".
 _TRAILING_GLUED_MARKER = re.compile(rf"([\d{re.escape(_SYMBOL_MARKERS)}]+)\s*$")
@@ -243,6 +249,8 @@ class AuthorLinker:
                 display_name = f"{given} {surname}".strip()
             if not display_name:
                 continue
+            display_name, extracted_degrees, extracted_markers = self._extract_degrees(display_name)
+            degrees = self._combine_degrees(extracted_degrees, str(item.get("degrees", "") or ""))
             if not (given and surname and initials):
                 parsed_given, parsed_initials, parsed_surname = self._split_name(display_name)
                 given = given or parsed_given
@@ -259,6 +267,9 @@ class AuthorLinker:
                 if affiliation_id and affiliation_id not in resolved:
                     resolved.append(affiliation_id)
             markers = [str(marker) for marker in (item.get("markers") or []) if str(marker).strip()]
+            for marker in extracted_markers:
+                if marker not in markers:
+                    markers.append(marker)
             unresolved = [
                 str(reference).strip()
                 for reference in references
@@ -297,6 +308,7 @@ class AuthorLinker:
                     affiliation_ids=resolved,
                     id=f"author_{position}",
                     markers=markers,
+                    degrees=degrees,
                 )
             )
             corresponding_flags.append(bool(item.get("corresponding")))
@@ -395,10 +407,18 @@ class AuthorLinker:
         # Pass 1 collects the author names and markers; pass 2 needs that marker
         # set to tell a lettered affiliation label ("a Alpha") from ordinary
         # text ("Alpha Institute").
-        parsed: list[tuple[str, list[str], int]] = []
+        parsed: list[tuple[str, list[str], int, str]] = []
         for entry_index, text in expanded_authors:
-            for author_text in self._split_author_list(text):
+            entry_text, entry_degrees, degree_markers = self._extract_degrees(text)
+            author_chunks = self._split_author_list(entry_text)
+            for chunk_index, author_text in enumerate(author_chunks):
+                is_final_chunk = chunk_index == len(author_chunks) - 1
+                degrees = entry_degrees if is_final_chunk else ""
                 name, markers = self._parse_author_chunk(author_text, known_markers)
+                if is_final_chunk:
+                    for marker in degree_markers:
+                        if marker not in markers:
+                            markers.append(marker)
                 if not name and markers:
                     # A bare marker chunk ("²") continues the previous author.
                     if parsed:
@@ -416,10 +436,10 @@ class AuthorLinker:
                             if marker not in parsed[-1][1]:
                                 parsed[-1][1].append(marker)
                     continue
-                parsed.append((name or author_text, markers, entry_index))
+                parsed.append((name or author_text, markers, entry_index, degrees))
 
         known_markers.update(
-            marker for _name, markers, _entry in parsed for marker in markers
+            marker for _name, markers, _entry, _degrees in parsed for marker in markers
         )
         affiliations = self._build_affiliations(affiliations_text, known_markers)
 
@@ -445,7 +465,7 @@ class AuthorLinker:
                 marker_to_id.setdefault(marker, affiliation.id)
 
         authors: list[Author] = []
-        for index, (name, markers, _entry) in enumerate(parsed, start=1):
+        for index, (name, markers, _entry, degrees) in enumerate(parsed, start=1):
             given_names, initials, surname = self._split_name(name)
             authors.append(
                 Author(
@@ -455,6 +475,7 @@ class AuthorLinker:
                     given_names=given_names,
                     id=f"author_{index}",
                     markers=markers,
+                    degrees=degrees,
                 )
             )
 
@@ -463,7 +484,7 @@ class AuthorLinker:
 
         # Printed markers win; the institution sharing the author's line fills
         # in the links the citation never printed.
-        for author, (_name, _markers, entry_index) in zip(authors, parsed):
+        for author, (_name, _markers, entry_index, _degrees) in zip(authors, parsed):
             for affiliation_id in embedded_ids.get(entry_index, ()):
                 if affiliation_id not in author.affiliation_ids:
                     author.affiliation_ids.append(affiliation_id)
@@ -471,6 +492,26 @@ class AuthorLinker:
         self._apply_matching_rules(authors, affiliations, issues, inline_ids)
         self._order_affiliations(authors, affiliations)
         return LinkedAuthors(authors=authors, affiliations=affiliations, issues=issues)
+
+    def _extract_degrees(self, text: str) -> tuple[str, str, list[str]]:
+        """Remove recognized trailing credentials while retaining markers."""
+
+        normalized = " ".join(str(text or "").translate(_SUPERSCRIPT_DIGITS).split())
+        match = _DEGREE_END.search(normalized)
+        if match is None:
+            return normalized, "", []
+        name = normalized[:match.start()].rstrip(" ,;.")
+        markers = self._split_marker_run(match.group("markers") or "")
+        return name, AuthorLinker._combine_degrees(match.group("degrees")), markers
+
+    @staticmethod
+    def _combine_degrees(*values: str) -> str:
+        degrees: list[str] = []
+        for value in values:
+            for degree in re.split(r"\s*,\s*", str(value or "").strip(" ,;")):
+                if degree and degree.casefold() not in {item.casefold() for item in degrees}:
+                    degrees.append(degree)
+        return ", ".join(degrees)
 
     @staticmethod
     def _normalize_marker_text(text: str) -> str:

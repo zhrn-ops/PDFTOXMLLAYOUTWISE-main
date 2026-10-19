@@ -209,6 +209,7 @@ class Document:
                     "surname": author.surname,
                     "display_name": author.display_name,
                     "affiliation_ids": list(author.affiliation_ids),
+                    "degrees": author.degrees,
                 }
                 for author in self.authors
             ],
