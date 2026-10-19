@@ -1,0 +1,1227 @@
+"""Author-affiliation linking.
+
+Matching follows the CAR author/affiliation table:
+
+===================================  =============  =====================
+Authors                              Affiliations   Rule
+===================================  =============  =====================
+any                                  none           no action
+any                                  1              that affiliation applies
+                                                    to every author
+1                                    >1             the author receives all
+                                                    affiliations
+>1                                   >1             match by printed marker
+>1                                   >1, no markers assumption is unsafe:
+                                                    leave unlinked and flag
+===================================  =============  =====================
+
+Markers may be digits, symbols, or letters, in any combination, and ranges are
+expanded (``1-3`` -> ``1,2,3``). They are read only from the marker position, so
+digits inside institution text are never mistaken for one.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import re
+from typing import Any
+
+from pdf_to_jats.core.auto_refiner import looks_like_address
+from pdf_to_jats.models.affiliation import Affiliation
+from pdf_to_jats.models.author import Author
+from pdf_to_jats.models.block import TextBlock, reading_order_key
+
+# "Nahas, S.J.1; Zhao, Y.2" — conference supplements put the surname first and
+# attach the affiliation marker to the initials, instead of the usual
+# "S.J. Nahas" given-name-first form.
+_SURNAME_MARKER_AUTHOR = re.compile(
+    r"([A-Z][A-Za-z'\u2019\-\u00C0-\u017F]+)\s*,\s*((?:[A-Z]\.){1,3})\s*(\d+(?:\s*,\s*\d+)*)?"
+)
+
+# "Sarah Smith, Bucknell University" — journal PDFs often embed the
+# institution directly in the author line instead of a numbered list.
+_AUTHOR_INSTITUTION_SPLIT = re.compile(r",\s*(?=(?:[A-Z][A-Za-z'’\-]+\s+){0,3}(?:University|Universit\u00e4t|Institute|Institut|Hospital|College|Center|Centre|School|Laborator|Foundation|Department|Academy))")
+
+# Institution vocabulary: text carrying any of these is never a personal name,
+# so a wrapped affiliation tail cannot become an "author" called
+# "Headache Center" when its line is treated as an address.
+_INSTITUTION_WORDS = re.compile(
+    r"\b(?:university|universit\u00e4t|institute|hospital|college|center|centre|school|"
+    r"laborator|foundation|department|academy|medical|clinic|health|society|association)\b",
+    re.IGNORECASE,
+)
+
+# Acronym institutions ("MIT", "WHO", "NCI") carry no keyword for the split
+# to see, so a tail that is one uppercase token is the institution on its line.
+# Letters only: initials with a marker ("S.J.1") are part of the author name.
+_INSTITUTION_TOKEN = re.compile(r"[A-Z]{2,6}\.?")
+
+# Post-nominals: "Jane Doe, PhD" names one person and awards a degree.
+_DEGREE_SUFFIX = re.compile(
+    r"(?:ph\.?d|m\.?d|m\.?s(?:c)?|b\.?s(?:c)?|d\.?phil|m\.?b\.?b\.?s|d\.?v\.?m|"
+    r"m\.?b\.?a|m\.?b\.?b\.?s|facs|r\.?n|m\.?p\.?h)\.?",
+    re.IGNORECASE,
+)
+
+# Superscript digits arrive as their own code points when a PDF keeps the
+# raised glyph; flatten them so one marker vocabulary is enough.
+_SUPERSCRIPT_DIGITS = str.maketrans("¹²³⁴⁵⁶⁷⁸⁹⁰", "1234567890")
+_SYMBOL_MARKERS = "*†‡§¶#"
+
+_MARKER_ATOM = rf"(?:\d{{1,3}}|[{re.escape(_SYMBOL_MARKERS)}]+|[A-Za-z])"
+_MARKER_RUN = rf"(?:{_MARKER_ATOM})(?:\s*[,\-\u2013]\s*(?:{_MARKER_ATOM}))*"
+
+# Digits or symbols glued to the end of a name: "Farias20", "Doe*".
+_TRAILING_GLUED_MARKER = re.compile(rf"([\d{re.escape(_SYMBOL_MARKERS)}]+)\s*$")
+# Markers glued to an initials token: "S.J.1 Nahas", "S.J.1,2 Nahas".
+_INITIALS_GLUED_MARKER = re.compile(rf"^((?:[A-Z]\.)+)({_MARKER_RUN})\s+(\S.*)$")
+# A standalone marker token separated by a space: "Jane Doe a", "Jane Doe 1,2".
+_STANDALONE_MARKER = re.compile(rf"^(.*\S)\s+({_MARKER_RUN})$")
+
+# Leading label on an affiliation block: "1 Univ", "1. Univ", "(1) Univ",
+# "[a] Univ", "a) Univ". A bare letter needs a delimiter so that "Department of
+# Oncology" is not read as the label "D".
+_AFFILIATION_LABEL = re.compile(
+    rf"^\s*(?:[\(\[](?P<bracket>\d{{1,3}}|[{re.escape(_SYMBOL_MARKERS)}]|[A-Za-z])[\)\]]"
+    rf"|(?P<plain>\d{{1,3}}|[{re.escape(_SYMBOL_MARKERS)}]+)"
+    rf"|(?P<letter>[A-Za-z])(?=[.,:)]))"
+    rf"\s*[.,:)]?\s+"
+)
+
+# A leading single letter plus whitespace; accepted only when an author carries
+# that letter as a marker.
+_BARE_LETTER_LABEL = re.compile(r"^\s*(?P<letter>[A-Za-z])\s+(?P<rest>\S.*)$")
+
+# A lowercase marker can be glued directly to the first word of an institution.
+_GLUED_LETTER_LABEL = re.compile(r"^(?P<letter>[a-z])(?=[A-Z])")
+
+# Labels are often printed with no space after the digits: "1Atrium Health".
+_GLUED_DIGIT_LABEL = re.compile(r"^(\d{1,3})(?=\S)")
+
+# A block that ends on a connector is a wrapped continuation of the entry above.
+_INCOMPLETE_TAIL = re.compile(
+    r"[,;:\-\u2013\u2014&/]\s*$|\b(?:and|of|at|the|de|di|del|du|la|le)\s*$",
+    re.IGNORECASE,
+)
+
+
+def split_author_institution(text: str) -> tuple[list[str], list[str]]:
+    """Split an author line into (author names, embedded affiliations)."""
+
+    cleaned = " ".join(str(text or "").replace("\n", " ").split()).strip(" ,;")
+    if not cleaned:
+        return [], []
+    parts = _AUTHOR_INSTITUTION_SPLIT.split(cleaned)
+    if len(parts) == 1:
+        return [cleaned], []
+    # Every split point sits in front of an institution keyword, so the head is
+    # the names and each remaining part is one institution. Taking "all but the
+    # last" instead would turn "A, B University, C Institute" into an author
+    # called "B University".
+    head = parts[0].strip(" ,;")
+    institutions = [part.strip(" ,;") for part in parts[1:] if part.strip(" ,;")]
+    return ([head] if head else []), institutions
+
+
+@dataclass(slots=True)
+class LinkIssue:
+    """One author/affiliation matching problem that a reviewer should see."""
+
+    severity: str
+    message: str
+    author_id: str = ""
+    affiliation_id: str = ""
+
+
+@dataclass(slots=True)
+class LinkedAuthors:
+    """Grouped author and affiliation output."""
+
+    authors: list[Author]
+    affiliations: list[Affiliation]
+    corresponding_author: Author | None = None
+    issues: list[LinkIssue] = field(default_factory=list)
+
+
+class AuthorLinker:
+    """Link authors to affiliations using printed markers, with CAR fallbacks."""
+
+    SURNAME_PARTICLES = {
+        "da", "das", "de", "del", "della", "der", "di", "do", "dos",
+        "du", "la", "le", "van", "vander", "von",
+    }
+
+    def link(self, authors_text: list[str], affiliations_text: list[str]) -> LinkedAuthors:
+        return self.link_from_texts(authors_text, affiliations_text)
+
+    def link_from_blocks(self, author_blocks: list[TextBlock], affiliation_blocks: list[TextBlock]) -> LinkedAuthors:
+        """Link authors and affiliations using the original text blocks."""
+
+        ordered_blocks = sorted(author_blocks, key=reading_order_key)
+        authors_text = [block.text for block in ordered_blocks if block.role != "corresponding_author"]
+        corresponding_texts = [block.text for block in ordered_blocks if block.role == "corresponding_author"]
+        affiliations_text = [block.text for block in sorted(affiliation_blocks, key=reading_order_key)]
+        linked = self.link_from_texts(authors_text, affiliations_text)
+        linked.corresponding_author = self._find_corresponding_author(corresponding_texts, linked.authors)
+        if linked.corresponding_author is None and linked.authors:
+            linked.corresponding_author = linked.authors[0]
+        return linked
+
+    def link_from_llm_response(self, response: dict[str, Any]) -> LinkedAuthors:
+        """Build linked authors and affiliations from an LLM parse of one article.
+
+        The model returns a normalized author list, an affiliation list, and the
+        markers connecting them. Names and links are taken from the response, but
+        the rules stay the same as the heuristic path: an affiliation reference
+        is matched against the affiliations the model actually returned, and an
+        author whose markers cannot be resolved is left unlinked and flagged
+        rather than handed an invented institution.
+        """
+
+        if not isinstance(response, dict):
+            return LinkedAuthors(authors=[], affiliations=[])
+
+        issues: list[LinkIssue] = []
+        affiliations: list[Affiliation] = []
+        marker_to_id: dict[str, str] = {}
+        text_to_id: dict[str, str] = {}
+        for item in response.get("affiliations") or []:
+            if isinstance(item, str):
+                item = {"text": item}
+            if not isinstance(item, dict):
+                continue
+            text = " ".join(str(item.get("text", "") or "").split())
+            if not text:
+                continue
+            if self._is_credential_sequence(text):
+                # Some model parses mistake post-nominals plus a superscript
+                # marker ("MD, MBA, FACS1") for an institution. Ignore those
+                # pseudo-affiliations so the actual marker 1 institution wins.
+                continue
+            marker = str(item.get("marker", "") or "").strip()
+            key = self._affiliation_key(text)
+            existing_id = text_to_id.get(key)
+            if existing_id is not None:
+                if marker:
+                    for affiliation in affiliations:
+                        if affiliation.id == existing_id:
+                            if marker not in affiliation.markers:
+                                affiliation.markers.append(marker)
+                            if not affiliation.marker:
+                                affiliation.marker = marker
+                                affiliation.raw_marker = marker
+                            break
+                    marker_to_id.setdefault(marker, existing_id)
+                continue
+            affiliation_id = marker or self._next_affiliation_id(affiliations)
+            affiliations.append(
+                Affiliation(
+                    id=affiliation_id,
+                    text=text,
+                    marker=marker,
+                    raw_marker=marker,
+                    markers=[marker] if marker else [],
+                )
+            )
+            text_to_id[key] = affiliation_id
+            if marker:
+                marker_to_id.setdefault(marker, affiliation_id)
+
+        authors: list[Author] = []
+        corresponding_flags: list[bool] = []
+        raw_authors = list(response.get("authors") or [])
+        for position, item in enumerate(raw_authors, start=1):
+            if isinstance(item, str):
+                item = {"display_name": item}
+            if not isinstance(item, dict):
+                continue
+            display_name = " ".join(str(item.get("display_name", "") or "").split())
+            given = str(item.get("given_names", "") or "").strip()
+            surname = str(item.get("surname", "") or "").strip()
+            initials = str(item.get("initials", "") or "").strip()
+            if not display_name and (given or surname):
+                display_name = f"{given} {surname}".strip()
+            if not display_name:
+                continue
+            if not (given and surname and initials):
+                parsed_given, parsed_initials, parsed_surname = self._split_name(display_name)
+                given = given or parsed_given
+                initials = initials or parsed_initials
+                surname = surname or parsed_surname
+            references = item.get("affiliations") or item.get("affiliation_ids") or []
+            if isinstance(references, str):
+                references = [references]
+            resolved: list[str] = []
+            for reference in references:
+                affiliation_id = self._resolve_llm_reference(
+                    str(reference).strip(), marker_to_id, affiliations
+                )
+                if affiliation_id and affiliation_id not in resolved:
+                    resolved.append(affiliation_id)
+            markers = [str(marker) for marker in (item.get("markers") or []) if str(marker).strip()]
+            unresolved = [
+                str(reference).strip()
+                for reference in references
+                if str(reference).strip()
+                and not self._resolve_llm_reference(str(reference).strip(), marker_to_id, affiliations)
+            ]
+            if unresolved:
+                issues.append(
+                    LinkIssue(
+                        severity="warning",
+                        message=(
+                            f'Author "{display_name}" references unknown affiliation(s): '
+                            f'{", ".join(unresolved)}'
+                        ),
+                        author_id=f"author_{position}",
+                    )
+                )
+            unresolved_markers = [marker for marker in markers if marker not in marker_to_id]
+            if unresolved_markers:
+                issues.append(
+                    LinkIssue(
+                        severity="warning",
+                        message=(
+                            f'Author "{display_name}" has marker(s) with no affiliation: '
+                            f'{", ".join(unresolved_markers)}'
+                        ),
+                        author_id=f"author_{position}",
+                    )
+                )
+            authors.append(
+                Author(
+                    initials=initials,
+                    surname=surname,
+                    display_name=display_name,
+                    given_names=given,
+                    affiliation_ids=resolved,
+                    id=f"author_{position}",
+                    markers=markers,
+                )
+            )
+            corresponding_flags.append(bool(item.get("corresponding")))
+
+        # Markers the model listed but did not turn into a link are still usable
+        # when they name an affiliation the model returned.
+        for author in authors:
+            if author.affiliation_ids or not author.markers:
+                continue
+            author.affiliation_ids = self._resolve_marker_ids(author.markers, marker_to_id)
+
+        # A response that names affiliations but links none of them falls back to
+        # the same safe CAR rules as the heuristic path instead of exporting the
+        # authors with no affiliation group at all.
+        if affiliations and not any(author.affiliation_ids for author in authors):
+            self._apply_matching_rules(authors, affiliations, issues)
+
+        corresponding = next(
+            (author for author, flagged in zip(authors, corresponding_flags) if flagged),
+            None,
+        )
+        if corresponding is None and authors:
+            corresponding = authors[0]
+
+        self._order_affiliations(authors, affiliations)
+        return LinkedAuthors(
+            authors=authors,
+            affiliations=affiliations,
+            corresponding_author=corresponding,
+            issues=issues,
+        )
+
+    @staticmethod
+    def _resolve_llm_reference(
+        reference: str,
+        marker_to_id: dict[str, str],
+        affiliations: list[Affiliation],
+    ) -> str:
+        """Map one LLM affiliation reference to a built affiliation id."""
+
+        if not reference:
+            return ""
+        if reference in marker_to_id:
+            return marker_to_id[reference]
+        lowered = reference.casefold()
+        for affiliation in affiliations:
+            if affiliation.id == reference:
+                return affiliation.id
+        for affiliation in affiliations:
+            if affiliation.text.casefold() == lowered:
+                return affiliation.id
+        return ""
+
+    def _find_corresponding_author(self, texts: list[str], authors: list[Author]) -> Author | None:
+        for text in texts:
+            name_text = re.sub(r"^\s*[*\u2020\u2021\u2020]*\s*presenting\s+author\s*:\s*", "", text, flags=re.IGNORECASE).strip()
+            name, _ = self._parse_author_chunk(name_text)
+            if not name:
+                continue
+            normalized_name = " ".join(name.lower().split())
+            for author in authors:
+                if normalized_name == " ".join(author.display_name.lower().split()):
+                    return author
+                if author.surname.lower() in normalized_name or normalized_name.endswith(author.surname.lower()):
+                    return author
+        return None
+
+    def link_from_texts(self, authors_text: list[str], affiliations_text: list[str]) -> LinkedAuthors:
+        issues: list[LinkIssue] = []
+        # Journal-style lines combine the name with the institution. Each
+        # printed entry is split first (entries are ";"-separated) and the
+        # names are remembered together with the institution on their own line:
+        # that provenance is the only link available when the citation prints
+        # no markers, and it beats assuming nothing at all.
+        entry_names: list[list[str]] = []
+        entry_institutions: list[list[str]] = []
+        authors_text = [self._normalize_marker_text(text) for text in authors_text]
+        affiliations_text = [self._normalize_marker_text(text) for text in affiliations_text]
+        known_markers = self._affiliation_letter_markers(affiliations_text)
+        for text in authors_text:
+            for entry in self._split_entries(text):
+                names, institutions = self._split_entry(entry)
+                if names or institutions:
+                    entry_names.append(names)
+                    entry_institutions.append(institutions)
+
+        expanded_authors = [
+            (index, name) for index, names in enumerate(entry_names) for name in names
+        ]
+        embedded = [
+            (index, institution)
+            for index, institutions in enumerate(entry_institutions)
+            for institution in institutions
+        ]
+
+        # Pass 1 collects the author names and markers; pass 2 needs that marker
+        # set to tell a lettered affiliation label ("a Alpha") from ordinary
+        # text ("Alpha Institute").
+        parsed: list[tuple[str, list[str], int]] = []
+        for entry_index, text in expanded_authors:
+            for author_text in self._split_author_list(text):
+                name, markers = self._parse_author_chunk(author_text, known_markers)
+                if not name and markers:
+                    # A bare marker chunk ("²") continues the previous author.
+                    if parsed:
+                        for marker in markers:
+                            if marker not in parsed[-1][1]:
+                                parsed[-1][1].append(marker)
+                    continue
+                if not self._is_valid_author_candidate(name or author_text):
+                    # A superscript may follow a post-nominal credential
+                    # instead of the surname ("Jane Doe, MD1"). The credential
+                    # is not an affiliation, but its marker belongs to the
+                    # preceding author.
+                    if markers and _DEGREE_SUFFIX.fullmatch((name or author_text).strip(" ,;.")) and parsed:
+                        for marker in markers:
+                            if marker not in parsed[-1][1]:
+                                parsed[-1][1].append(marker)
+                    continue
+                parsed.append((name or author_text, markers, entry_index))
+
+        known_markers.update(
+            marker for _name, markers, _entry in parsed for marker in markers
+        )
+        affiliations = self._build_affiliations(affiliations_text, known_markers)
+
+        # Embedded institutions are complete as printed: unlike a wrapped
+        # affiliation block they never fold into the entry above, and they
+        # reuse an affiliation the PDF already prints on its own instead of
+        # duplicating it.
+        embedded_ids: dict[int, list[str]] = {}
+        inline_ids: set[str] = set()
+        for entry_index, institution in embedded:
+            affiliation = self._add_embedded_affiliation(
+                affiliations, institution, known_markers
+            )
+            embedded_ids.setdefault(entry_index, []).append(affiliation.id)
+            if entry_names[entry_index]:
+                # Printed on a line that also carries a name: this institution
+                # belongs to that author alone and must not be handed round.
+                inline_ids.add(affiliation.id)
+
+        marker_to_id: dict[str, str] = {}
+        for affiliation in affiliations:
+            for marker in affiliation.markers:
+                marker_to_id.setdefault(marker, affiliation.id)
+
+        authors: list[Author] = []
+        for index, (name, markers, _entry) in enumerate(parsed, start=1):
+            given_names, initials, surname = self._split_name(name)
+            authors.append(
+                Author(
+                    initials=initials,
+                    surname=surname,
+                    display_name=name,
+                    given_names=given_names,
+                    id=f"author_{index}",
+                    markers=markers,
+                )
+            )
+
+        for author in authors:
+            author.affiliation_ids = self._resolve_marker_ids(author.markers, marker_to_id)
+
+        # Printed markers win; the institution sharing the author's line fills
+        # in the links the citation never printed.
+        for author, (_name, _markers, entry_index) in zip(authors, parsed):
+            for affiliation_id in embedded_ids.get(entry_index, ()):
+                if affiliation_id not in author.affiliation_ids:
+                    author.affiliation_ids.append(affiliation_id)
+
+        self._apply_matching_rules(authors, affiliations, issues, inline_ids)
+        self._order_affiliations(authors, affiliations)
+        return LinkedAuthors(authors=authors, affiliations=affiliations, issues=issues)
+
+    @staticmethod
+    def _normalize_marker_text(text: str) -> str:
+        """Normalize raised digits and reversible UTF-8/Latin-1 artifacts."""
+
+        value = str(text or "")
+        if any(marker in value for marker in ("Ã", "Â", "â")):
+            try:
+                repaired = value.encode("latin-1").decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                repaired = value
+            if repaired.count("�") <= value.count("�"):
+                value = repaired
+        superscript = {chr(0x00B9): "1", chr(0x00B2): "2", chr(0x00B3): "3"}
+        superscript.update({chr(codepoint): str(codepoint - 0x2070) for codepoint in range(0x2070, 0x207A) if codepoint != 0x2071})
+        return value.translate(str.maketrans(superscript))
+
+    @staticmethod
+    def _split_entries(text: str) -> list[str]:
+        """Split a block into the entries its punctuation separates.
+
+        Semicolons delimit author entries (``"J. Smith, Boston University;
+        A. Lee, MIT"``). Line breaks usually delimit wrapped byline rows, but a
+        break can also divide one multi-part name (``"Vania\nHungria18"``).
+        Rejoin that narrow case before splitting the remaining rows.
+        """
+
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.strip() for line in raw.split("\n") if line.strip()]
+        joined_lines: list[str] = []
+        for line in lines:
+            if joined_lines and AuthorLinker._is_wrapped_name_continuation(joined_lines[-1], line):
+                joined_lines[-1] = f"{joined_lines[-1].rstrip()} {line.lstrip()}"
+            else:
+                joined_lines.append(line)
+        return [
+            cleaned
+            for part in re.split(r";", "\n".join(joined_lines))
+            if (cleaned := " ".join(part.split()).strip(" ,;"))
+        ]
+
+    @staticmethod
+    def _is_wrapped_name_continuation(previous_line: str, next_line: str) -> bool:
+        """Recognize a name split at a line edge before a marked surname."""
+
+        previous_tail = re.search(r",\s*([A-Z][A-Za-z'\u2019\-]+)$", previous_line)
+        next_head = re.match(
+            r"([A-Z][A-Za-z'\u2019\-]+)(?:\d{1,3}|[*\u2020\u2021]+)?(?:,|\s|$)",
+            next_line,
+        )
+        return bool(previous_tail and next_head)
+
+    def _split_entry(self, entry: str) -> tuple[list[str], list[str]]:
+        """Split one entry into its names and its affiliations."""
+
+        names, institutions = split_author_institution(entry)
+        if institutions:
+            return names, institutions
+        head, separator, tail = entry.partition(",")
+        if separator and self._looks_like_person(head) and self._is_credential_sequence(tail):
+            return [entry], []
+        if looks_like_address(entry):
+            # An address tail that landed in an author block is affiliation
+            # data, but a personal name in front of it still belongs to the
+            # citation: "Jane Doe, Philadelphia, PA, USA" keeps Jane Doe.
+            return self._split_address_entry(entry)
+        if not separator:
+            # A line holding only an institution: a wrapped affiliation whose
+            # author sits on the line above.
+            if _INSTITUTION_WORDS.search(entry) or _INSTITUTION_TOKEN.fullmatch(entry):
+                return [], [entry]
+            return names, institutions
+        if not self._looks_like_person(head):
+            # Wrapped affiliation text with no institution keyword, e.g. an
+            # OCR shard like "4The Los Angeles Headache Center, Los Angeles
+            # and San Diego". Parsing it as names produced authors such as
+            # "Los Angeles" and "San Diego".
+            return [], [entry]
+        tail = tail.strip(" ,;")
+        if self._is_credential_sequence(tail):
+            return [head + ", " + tail], []
+        if tail and not _DEGREE_SUFFIX.fullmatch(tail) and (
+            _INSTITUTION_TOKEN.fullmatch(tail) or _INSTITUTION_WORDS.search(tail)
+        ):
+            # "A. Lee, MIT": the acronym carries no keyword, but it is still
+            # this line's institution, and losing it made the single-affiliation
+            # rule hand Boston University to A. Lee.
+            return [head], [tail]
+        return names, institutions
+
+    def _split_address_entry(self, entry: str) -> tuple[list[str], list[str]]:
+        """Keep a personal name in front of an address, else keep it as text."""
+
+        head, separator, tail = entry.partition(",")
+        head, tail = head.strip(" ,;"), tail.strip(" ,;")
+        if separator and head and tail and self._looks_like_person(head):
+            return [head], [tail]
+        return [], [entry]
+
+    @staticmethod
+    def _is_credential_sequence(text: str) -> bool:
+        """Keep post-nominals such as ``MD, MBA, FACS1`` with their author."""
+
+        parts = [
+            part.strip(" ,;.")
+            for part in re.split(r"[,;\s]+", text)
+            if part.strip(" ,;.")
+        ]
+        if not parts:
+            return False
+        final = _TRAILING_GLUED_MARKER.search(parts[-1])
+        if final:
+            parts[-1] = parts[-1][:final.start()].strip(" ,;.")
+        return all(bool(_DEGREE_SUFFIX.fullmatch(part)) for part in parts)
+
+    @staticmethod
+    def _looks_like_person(text: str) -> bool:
+        """True when text could plausibly be a personal name.
+
+        Institution words are rejected outright so "Headache Center" or
+        "Medical Center" never becomes an author when their line is treated
+        as an address tail.
+        """
+
+        if not text or _INSTITUTION_WORDS.search(text):
+            return False
+        return True
+
+
+    # ------------------------------------------------------------------
+    # Marker handling
+    # ------------------------------------------------------------------
+
+    def _parse_author_chunk(
+        self, text: str, known_markers: set[str] | None = None
+    ) -> tuple[str, list[str]]:
+        """Return an author name with its affiliation markers removed."""
+
+        cleaned = " ".join(text.translate(_SUPERSCRIPT_DIGITS).replace("\n", " ").split()).strip(" ,;")
+        if not cleaned:
+            return "", []
+
+        # A chunk holding nothing but markers ("1,2", "2", "*") is a comma
+        # split artefact that continues the author before it.
+        if not re.search(r"[A-Za-z]", cleaned):
+            markers = self._split_marker_run(cleaned)
+            if markers:
+                return "", markers
+        if len(cleaned) == 1 and cleaned.isalpha():
+            return "", [cleaned]
+
+        # Markers carried on the initials after surname-first normalization.
+        initials_match = _INITIALS_GLUED_MARKER.match(cleaned)
+        if initials_match:
+            markers = self._split_marker_run(initials_match.group(2))
+            name = f"{initials_match.group(1)} {initials_match.group(3)}".strip(" ,;")
+            return name if self._has_name_letters(name) else "", markers
+
+        markers: list[str] = []
+        # OCR frequently appends a lowercase affiliation letter to a surname
+        # ("Savagea"). Strip it only when that letter is visibly used to label
+        # an affiliation in this same article.
+        if known_markers:
+            letter_match = re.search(r"([a-z])$", cleaned)
+            if letter_match and letter_match.group(1) in known_markers:
+                before = cleaned[: letter_match.start()].rstrip()
+                if self._has_name_letters(before):
+                    markers = [letter_match.group(1)]
+                    cleaned = before
+        glued = _TRAILING_GLUED_MARKER.search(cleaned)
+        if glued and not markers:
+            trailing = glued.group(1)
+            before = cleaned[: glued.start()].rstrip()
+            # A lone trailing number is a marker only when a name precedes it.
+            if before and self._has_name_letters(before):
+                markers = self._split_marker_run(trailing)
+                cleaned = before
+
+        if not markers:
+            standalone = _STANDALONE_MARKER.match(cleaned)
+            if standalone and self._is_marker_run(standalone.group(2)) and self._has_name_letters(standalone.group(1)):
+                markers = self._split_marker_run(standalone.group(2))
+                cleaned = standalone.group(1)
+
+        return cleaned.strip(" ,;"), markers
+
+    def _split_marker_run(self, run: str) -> list[str]:
+        """Expand a marker run such as ``"1,2"``, ``"1-3"`` or ``"*†"``."""
+
+        markers: list[str] = []
+        for token in re.split(r"\s*,\s*", str(run or "").strip(" ,;.")):
+            token = token.strip()
+            if not token:
+                continue
+            span = re.fullmatch(r"(\d{1,3})\s*[-\u2013]\s*(\d{1,3})", token)
+            if span and int(span.group(1)) <= int(span.group(2)):
+                markers.extend(
+                    str(value) for value in range(int(span.group(1)), int(span.group(2)) + 1)
+                )
+                continue
+            if re.fullmatch(r"\d{1,3}", token):
+                markers.append(str(int(token)))
+                continue
+            markers.extend(character for character in token if not character.isspace())
+        return self._dedupe_preserve_order([marker for marker in markers if marker])
+
+    @staticmethod
+    def _affiliation_letter_markers(texts: list[str]) -> set[str]:
+        """Find lowercase letter labels visibly glued to affiliation names."""
+
+        markers: set[str] = set()
+        for text in texts:
+            for match in re.finditer(r"(?:^|[\s,])([a-z])(?=[A-Z])", str(text or "")):
+                markers.add(match.group(1))
+        return markers
+
+    @staticmethod
+    def _is_marker_run(token: str) -> bool:
+        """True only for tokens that are entirely markers (never a real word)."""
+
+        if not token or not re.fullmatch(_MARKER_RUN, token):
+            return False
+        # A multi-letter token is a word, not a lettered marker.
+        letters = [character for character in token if character.isalpha()]
+        return len(letters) <= 1 or bool(re.search(r"[,\-]", token))
+
+    @staticmethod
+    def _has_name_letters(text: str) -> bool:
+        return len(re.findall(r"[A-Za-z]", text)) >= 2
+
+    def _resolve_marker_ids(self, markers: list[str], marker_to_id: dict[str, str]) -> list[str]:
+        resolved: list[str] = []
+        for marker in self._dedupe_preserve_order(markers):
+            affiliation_id = marker_to_id.get(marker)
+            if affiliation_id and affiliation_id not in resolved:
+                resolved.append(affiliation_id)
+        return resolved
+
+    # ------------------------------------------------------------------
+    # Affiliation segmentation
+    # ------------------------------------------------------------------
+
+    def _add_embedded_affiliation(
+        self, affiliations: list[Affiliation], text: str, known_markers: set[str]
+    ) -> Affiliation:
+        """Add one institution lifted out of an author line.
+
+        Unlike an affiliation block, an embedded institution never folds into
+        the entry above it: that fold merged two authors' institutions into a
+        single affiliation. When the PDF already prints the same institution
+        on its own, that entry is reused instead of duplicated.
+        """
+
+        cleaned = " ".join(str(text or "").split())
+        marker, raw_marker, body = self._split_affiliation_label(cleaned, known_markers)
+        entry_text = body or cleaned
+        key = self._affiliation_key(entry_text)
+        if key:
+            for existing in affiliations:
+                if self._affiliation_matches(existing, key):
+                    if marker and marker not in existing.markers:
+                        existing.markers.append(marker)
+                    if marker and not existing.marker:
+                        existing.marker = marker
+                        existing.raw_marker = raw_marker
+                    return existing
+        affiliation = Affiliation(
+            id=self._next_affiliation_id(affiliations),
+            text=entry_text,
+            marker=marker,
+            raw_marker=raw_marker,
+            markers=[marker] if marker else [],
+        )
+        affiliations.append(affiliation)
+        return affiliation
+
+    def _affiliation_matches(self, affiliation: Affiliation, key: str) -> bool:
+        """True when an already built affiliation covers this key.
+
+        The same institution prints in two lengths: the author line says
+        "Boston University" while its block says "Boston University, Chestnut
+        Hill, USA". Either direction of the prefix counts as a match, but a
+        key this short cannot be trusted for prefixing.
+        """
+
+        existing = self._affiliation_key(affiliation.text)
+        if existing == key:
+            return True
+        shorter, longer = sorted((existing, key), key=len)
+        return len(shorter) >= 3 and longer.startswith(shorter)
+
+    @staticmethod
+    def _next_affiliation_id(affiliations: list[Affiliation]) -> str:
+        """Return an unused ``aff_N`` id; numbering may have skipped values."""
+
+        used = {affiliation.id for affiliation in affiliations}
+        index = 1
+        while f"aff_{index}" in used:
+            index += 1
+        return f"aff_{index}"
+
+    def _build_affiliations(self, texts: list[str], known_markers: set[str] | None = None) -> list[Affiliation]:
+        """Turn affiliation text blocks into deduplicated affiliations.
+
+        Blocks are processed individually so two unmarked affiliations never
+        merge just because neither carries a semicolon, while a wrapped line
+        that ends on a connector is folded back into the entry above it.
+        """
+
+        entries: list[dict[str, str]] = []
+        for text in texts:
+            cleaned = " ".join(self._normalize_marker_text(text).replace("\n", " ").split())
+            if not cleaned:
+                continue
+            # Affiliations are often run together by PDF extraction as
+            # "¹Department..., Sejong, South Korea, ²Department..., Daejeon...".
+            # A cited numbered/symbol marker starts a new affiliation even
+            # when the source uses commas instead of semicolons.
+            candidates = re.split(r"\s*;\s*", cleaned)
+            candidates = [
+                piece
+                for candidate in candidates
+                for piece in self._split_marked_affiliation_run(candidate, known_markers or set())
+            ]
+            for candidate in (part.strip(" ,;") for part in candidates):
+                if not candidate:
+                    continue
+                marker, raw_marker, body = self._split_affiliation_label(
+                    candidate, known_markers or set()
+                )
+                if not marker and entries and self._looks_incomplete(entries[-1]["text"]):
+                    entries[-1]["text"] = f"{entries[-1]['text']} {body}".strip()
+                    continue
+                entries.append({"marker": marker, "raw_marker": raw_marker, "text": body or candidate})
+
+        # Some extractors drop the first superscript but preserve later labels
+        # (for example an unlabelled first entry followed by 2, 3, 4). Recover
+        # that missing first label only when the entry count and every surviving
+        # label prove a complete, ordered sequence cited by the authors.
+        numeric_markers = sorted(
+            (marker for marker in (known_markers or set()) if marker.isdigit()),
+            key=int,
+        )
+        if len(entries) == len(numeric_markers) and numeric_markers:
+            labels_match_positions = all(
+                not entry["marker"] or entry["marker"] == numeric_markers[index]
+                for index, entry in enumerate(entries)
+            )
+            if labels_match_positions and any(not entry["marker"] for entry in entries):
+                for index, entry in enumerate(entries):
+                    if not entry["marker"]:
+                        entry["marker"] = numeric_markers[index]
+                        entry["raw_marker"] = numeric_markers[index]
+
+        by_key: dict[str, Affiliation] = {}
+        affiliations: list[Affiliation] = []
+        for index, entry in enumerate(entries, start=1):
+            key = self._affiliation_key(entry["text"])
+            if not key:
+                continue
+            existing = by_key.get(key)
+            if existing is not None:
+                marker = entry["marker"]
+                if marker and marker not in existing.markers:
+                    existing.markers.append(marker)
+                continue
+            marker = entry["marker"]
+            affiliation = Affiliation(
+                id=marker or f"aff_{index}",
+                text=entry["text"],
+                marker=marker,
+                raw_marker=entry["raw_marker"],
+                markers=[marker] if marker else [],
+            )
+            by_key[key] = affiliation
+            affiliations.append(affiliation)
+        return affiliations
+
+    @staticmethod
+    def _split_marked_affiliation_run(text: str, known_markers: set[str]) -> list[str]:
+        """Split a run where a cited number marks a new affiliation.
+
+        PDF extraction commonly glues the marker to the affiliation name
+        (``United States 2Stroke Unit``), so accept a marker after whitespace
+        as well as after a comma. Requiring a cited marker and a capitalized
+        following word avoids splitting postal codes or ordinary numbers.
+        """
+
+        markers = sorted(known_markers, key=lambda marker: (not marker.isdigit(), -len(marker), marker))
+        if not markers:
+            return [text]
+        parts: list[str] = []
+        start = 0
+        for match in re.finditer(r"(?:,\s*|\s+)(\d{1,3}|[a-z])(?=[A-Z])", text):
+            marker = match.group(1)
+            if marker not in markers:
+                continue
+            parts.append(text[start:match.start(1)].strip(" ,;"))
+            start = match.start(1)
+        parts.append(text[start:].strip(" ,;"))
+        return [part for part in parts if part]
+
+    @staticmethod
+    def _affiliation_boundary_pattern(known_markers: set[str]) -> str:
+        """Build a pattern for a printed marker that begins another affiliation."""
+
+        numeric = sorted((marker for marker in known_markers if marker.isdigit()), key=len, reverse=True)
+        if not numeric:
+            return r"(?!)"
+        alternatives = "|".join(re.escape(marker) for marker in numeric)
+        # Accept superscript or baseline digits followed by an institution-like
+        # start. A country/city/postal tail cannot satisfy this vocabulary.
+        superscript_digits = "".join(chr(codepoint) for codepoint in range(0x2070, 0x207A))
+        superscript_digits = superscript_digits.replace(chr(0x2071), "")
+        superscript_digits += chr(0x00B9) + chr(0x00B2) + chr(0x00B3)
+        return rf"\s*,\s*(?:[{re.escape(superscript_digits)}])?(?:{alternatives})\s*(?=[A-Z])"
+
+    @staticmethod
+    def _looks_incomplete(text: str) -> bool:
+        """True when an affiliation entry is a fragment awaiting its next line.
+
+        Wrapped affiliations arrive as a marked first line ("10Seoul") followed
+        by unmarked text, so an entry that neither ends on a connector nor
+        carries a country/postal marker is treated as unfinished.
+        """
+
+        if _INCOMPLETE_TAIL.search(text):
+            return True
+        return not looks_like_address(text)
+
+    def _split_affiliation_label(
+        self, text: str, known_markers: set[str]
+    ) -> tuple[str, str, str]:
+        """Return ``(normalized marker, printed marker, text without label)``.
+
+        A leading single letter is only treated as a label when some author
+        actually carries that letter as a marker, so "Alpha Institute" is never
+        read as the label ``A``.
+        """
+
+        match = _AFFILIATION_LABEL.match(text)
+        if match:
+            raw_marker = next((group for group in match.groupdict().values() if group), "")
+            markers = self._split_marker_run(raw_marker)
+            marker = markers[0] if markers else ""
+            if marker:
+                body = text[match.end():].strip(" ,;")
+                return marker, raw_marker, body
+
+        bare_letter = _BARE_LETTER_LABEL.match(text)
+        if bare_letter and bare_letter.group("letter") in known_markers:
+            return (
+                bare_letter.group("letter"),
+                bare_letter.group("letter"),
+                bare_letter.group("rest").strip(" ,;"),
+            )
+
+        glued = _GLUED_DIGIT_LABEL.match(text)
+        if glued:
+            digits = glued.group(1)
+            # "214th Department" is marker 21 followed by "4th Department", not
+            # marker 214. Prefer the longest prefix an author actually cites,
+            # then the longest that leaves a capitalised body.
+            for length in range(len(digits), 0, -1):
+                if digits[:length] in known_markers:
+                    return digits[:length], digits[:length], text[length:].strip(" ,;")
+            for length in range(len(digits), 0, -1):
+                remainder = text[length:]
+                if remainder[:1].isupper():
+                    return digits[:length], digits[:length], remainder.strip(" ,;")
+        glued_letter = _GLUED_LETTER_LABEL.match(text)
+        if glued_letter and glued_letter.group("letter") in known_markers:
+            marker = glued_letter.group("letter")
+            return marker, marker, text[glued_letter.end():].strip(" ,;")
+        return "", "", text
+
+    @staticmethod
+    def _affiliation_key(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).strip()
+
+    # ------------------------------------------------------------------
+    # CAR matching rules and ordering
+    # ------------------------------------------------------------------
+
+    def _apply_matching_rules(
+        self,
+        authors: list[Author],
+        affiliations: list[Affiliation],
+        issues: list[LinkIssue],
+        inline_ids: set[str] | None = None,
+    ) -> None:
+        if not affiliations:
+            return
+
+        if len(affiliations) == 1:
+            only = affiliations[0]
+            belongs_to_one_author = only.id in (inline_ids or set())
+            for author in authors:
+                if author.affiliation_ids:
+                    continue
+                if belongs_to_one_author:
+                    # The institution was printed on one author's own line, so
+                    # it is that author's affiliation; the rest of the byline
+                    # simply carries none in the source ("Jennifer Warnock,
+                    # Oak Ridge National Laboratory" followed by unmarked co-
+                    # authors). Broadcasting would invent one for every name.
+                    issues.append(
+                        LinkIssue(
+                            severity="warning",
+                            message=(
+                                f"Author \"{author.display_name}\" carries no marker "
+                                "and no affiliation of its own; left unlinked rather than assumed"
+                            ),
+                            author_id=author.id,
+                        )
+                    )
+                    continue
+                author.affiliation_ids = [only.id]
+                issues.append(
+                    LinkIssue(
+                        severity="warning",
+                        message=(
+                            f"Single affiliation applied to \"{author.display_name}\" "
+                            "because no marker could be resolved"
+                        ),
+                        author_id=author.id,
+                        affiliation_id=only.id,
+                    )
+                )
+            return
+
+        if len(authors) == 1 and not any(author.markers for author in authors):
+            author = authors[0]
+            author.affiliation_ids = [affiliation.id for affiliation in affiliations]
+            issues.append(
+                LinkIssue(
+                    severity="warning",
+                    message=(
+                        f"Single author \"{author.display_name}\" received all "
+                        f"{len(affiliations)} affiliations because the citation carries no markers"
+                    ),
+                    author_id=author.id,
+                )
+            )
+            return
+
+        for author in authors:
+            if author.affiliation_ids:
+                continue
+            if author.markers:
+                issues.append(
+                    LinkIssue(
+                        severity="error",
+                        message=(
+                            f"Author \"{author.display_name}\" has marker(s) "
+                            f"{', '.join(author.markers)} that match no affiliation"
+                        ),
+                        author_id=author.id,
+                    )
+                )
+            else:
+                issues.append(
+                    LinkIssue(
+                        severity="warning",
+                        message=(
+                            f"Author \"{author.display_name}\" carries no marker; "
+                            "left unlinked rather than assumed"
+                        ),
+                        author_id=author.id,
+                    )
+                )
+
+        for affiliation in affiliations:
+            if not any(affiliation.id in author.affiliation_ids for author in authors):
+                issues.append(
+                    LinkIssue(
+                        severity="warning",
+                        message=(
+                            f"Affiliation \"{affiliation.text[:60]}\" is not referenced "
+                            "by any author"
+                        ),
+                        affiliation_id=affiliation.id,
+                    )
+                )
+
+    def _order_affiliations(self, authors: list[Author], affiliations: list[Affiliation]) -> None:
+        """Order by first author mention; unreferenced entries keep reading order."""
+
+        first_mention: dict[str, int] = {}
+        for index, author in enumerate(authors):
+            for affiliation_id in author.affiliation_ids:
+                first_mention.setdefault(affiliation_id, index)
+        affiliations.sort(key=lambda affiliation: first_mention.get(affiliation.id, len(authors)))
+
+    # ------------------------------------------------------------------
+    # Author parsing
+    # ------------------------------------------------------------------
+
+    def _split_author_list(self, text: str) -> list[str]:
+        """Split a compressed author line into individual author strings.
+
+        The source PDF may separate authors with punctuation, spaces, or line breaks.
+        This tries a few name-shaped patterns before falling back to the raw text.
+        """
+
+        cleaned = " ".join(text.replace("\n", " ").split())
+        if not cleaned:
+            return []
+
+        # Surname-first lists need normalizing before the generic comma split,
+        # which would otherwise tear each name into a surname and an initial.
+        surname_first = self._extract_surname_first_authors(cleaned)
+        if surname_first:
+            return surname_first
+
+        # If the block is a flat list of surname-like tokens, split on separators first.
+        if re.search(r"\s*;\s*", cleaned) or re.search(r"\s*,\s*", cleaned):
+            parts = [part.strip(" ,;") for part in re.split(r"\s*(?:;|,|&|\band\b)\s*", cleaned) if part.strip(" ,;")]
+            if len(parts) > 1:
+                return parts
+
+        # Common forms:
+        #   "J. Bae, J. Kim"
+        #   "Bae J, Kim J"
+        #   "J.H. Bae J. Kim"
+        surname_first = self._extract_surname_first_authors(cleaned)
+        if surname_first:
+            return surname_first
+
+        initials_first = self._extract_initials_first_authors(cleaned)
+        if len(initials_first) > 1:
+            return [part.strip(" ,;") for part in initials_first if part.strip(" ,;")]
+
+        return [cleaned]
+
+    def _extract_surname_first_authors(self, text: str) -> list[str]:
+        """Normalize surname-first author lists into ``"Initials Surname"`` form.
+
+        Downstream parsing assumes given names come first, so returning the
+        source order (``"Nahas, S.J."``) made ``_split_name`` emit the initials
+        as the surname. Inline affiliation markers are kept attached to the
+        initials so they can still be recovered afterwards.
+        """
+
+        matches = _SURNAME_MARKER_AUTHOR.findall(text)
+        if not matches:
+            return []
+        if len(matches) == 1 and matches[0][1].strip() and text.strip().strip(" ,;") != (
+            f"{matches[0][0]}, {matches[0][1]}{matches[0][2]}".strip(" ,;")
+        ):
+            return []
+        return [
+            f"{initials}{markers or ''} {surname}"
+            for surname, initials, markers in matches
+        ]
+
+    def _extract_initials_first_authors(self, text: str) -> list[str]:
+        pattern = re.compile(
+            r"(?:[A-Z]\.(?:\s*[A-Z]\.)*|[A-Z]\.?)\s+[A-Z][a-zA-Z'’\-\u00C0-\u017F]+(?:\s+[A-Z][a-zA-Z'’\-\u00C0-\u017F]+)*"
+        )
+        return [match.group(0).strip(" ,;") for match in pattern.finditer(text)]
+
+    def _dedupe_preserve_order(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            result.append(value)
+        return result
+
+    def _split_name(self, full_name: str) -> tuple[str, str, str]:
+        parts = [part for part in full_name.split() if part]
+        if not parts:
+            return "", "", ""
+        if len(parts) == 1:
+            return parts[0], f"{parts[0][0].upper()}.", parts[0]
+
+        surname_start = len(parts) - 1
+        for index, part in enumerate(parts[1:], start=1):
+            if part.rstrip(".").lower() in self.SURNAME_PARTICLES:
+                surname_start = index
+                break
+        given_parts = parts[:surname_start]
+        surname_parts = parts[surname_start:]
+        initials_parts = []
+        for part in given_parts:
+            if re.fullmatch(r"(?:[A-Z]\.)+", part):
+                initials_parts.append(part if part.endswith(".") else f"{part}.")
+            else:
+                initials_parts.append(f"{part[0].upper()}.")
+        return " ".join(given_parts), "".join(initials_parts), " ".join(surname_parts)
+
+    def _is_valid_author_candidate(self, text: str) -> bool:
+        """Reject obvious footer noise and non-name text before author serialization."""
+
+        cleaned = " ".join(text.replace("\ufeff", " ").replace("\u00a0", " ").split()).strip(" ,;")
+        if not cleaned:
+            return False
+        lowered = cleaned.lower()
+        # Address and affiliation tails are not people. Without this, a wrapped
+        # affiliation such as "... Los Angeles and San Diego, CA, USA" produced
+        # authors named "Los Angeles" and "San Diego".
+        if looks_like_address(cleaned):
+            return False
+        if cleaned in {"|", "||", "©", "®"}:
+            return False
+        if "copyright" in lowered or "published by" in lowered or "all rights reserved" in lowered:
+            return False
+        if lowered.startswith("the authors.") or lowered.startswith("the authors"):
+            return False
+        if cleaned.upper() in {"ABSTRACT", "A B S T R A C T"}:
+            return False
+        if _DEGREE_SUFFIX.fullmatch(cleaned):
+            # "PhD" and friends are post-nominals printed beside a name.
+            return False
+        if not any(ch.isalpha() for ch in cleaned):
+            return False
+        if sum(1 for ch in cleaned if ch.isalpha()) < 2:
+            return False
+        if re.fullmatch(r"[^\w]+", cleaned):
+            return False
+        # URLs, DOIs, and reference tails are never authors.
+        if re.search(r"(?:https?:|doi\.org|\bdoi\b|10\.\d{4,}/|www\.)", lowered):
+            return False
+        if cleaned.count("/") >= 2 or "\u200b" in cleaned:
+            return False
+        # Names start with a capital letter; lowercase fragments are body text.
+        first_alpha = next((ch for ch in cleaned if ch.isalpha()), "")
+        if first_alpha and first_alpha.islower():
+            return False
+        # Institution tails that kept their own line are not people.
+        last_word = cleaned.rstrip(" ,;.").rsplit(" ", 1)[-1].lower()
+        if last_word in {
+            "university", "institute", "hospital", "college", "center", "centre",
+            "school", "laboratory", "department", "foundation", "academy", "institut",
+        }:
+            return False
+        # Pure place-name fragments ("Philadelphia", "PA", "USA", "New York")
+        # are affiliation tails, not people.
+        place_tokens = {
+            "usa", "uk", "canada", "germany", "france", "italy", "spain", "japan",
+            "china", "india", "australia", "brazil", "netherlands", "sweden",
+            "switzerland", "philadelphia", "boston", "london", "paris", "berlin",
+            "new york", "new jersey", "united states", "united kingdom",
+            "los angeles", "san diego",
+        }
+        if lowered in place_tokens or re.fullmatch(r"[A-Z]{1,3}", cleaned):
+            return False
+        if len(cleaned) > 8 and sum(1 for ch in cleaned if ch.isupper()) == len([ch for ch in cleaned if ch.isalpha()]):
+            # Very short all-caps shards are usually OCR noise.
+            return False
+        return bool(re.search(r"[A-Za-z]", cleaned))
