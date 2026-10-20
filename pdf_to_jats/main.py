@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import faulthandler
 import sys
 
 if __package__ in {None, ""}:
@@ -16,6 +17,9 @@ from pdf_to_jats.utils.logger import configure_logging
 
 def main() -> int:
     """Start the desktop application."""
+    # PySide can terminate on a native Qt/threading fault without a Python
+    # traceback. Keep fatal Python-level diagnostics in the run.ps1 console.
+    faulthandler.enable()
     configure_logging()
     app = QApplication(sys.argv)
     window = MainWindow()

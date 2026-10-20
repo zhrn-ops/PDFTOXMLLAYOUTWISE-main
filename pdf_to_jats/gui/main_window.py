@@ -162,6 +162,15 @@ class _ImmediateLLMClient:
 class MainWindow(QMainWindow):
     """Main window with extraction and export controls."""
 
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        thread = getattr(self, "_article_finish_thread", None)
+        if thread is not None and thread.isRunning():
+            event.ignore()
+            message = "Finish Article is still processing; wait for it to complete before closing."
+            self._log(message)
+            return
+        super().closeEvent(event)
+
     def __init__(self) -> None:
         super().__init__()
         self.config = load_config()
@@ -264,20 +273,6 @@ class MainWindow(QMainWindow):
         self.reopen_article_btn = QPushButton("Reopen Article")
         self.reopen_article_btn.setToolTip("Unlock a finished article so it can be edited again.")
         self.reopen_article_btn.clicked.connect(self.reopen_current_article)
-        auto_pipeline_btn = QPushButton("Auto Pipeline")
-        auto_pipeline_btn.setToolTip(
-            "Extract, classify, auto-refine, and export XML to the default folder in one click."
-        )
-        auto_pipeline_btn.clicked.connect(self.run_auto_pipeline)
-        self.finish_selection_btn = QPushButton("Finish Selection")
-        self.finish_selection_btn.setToolTip(
-            "Export the selected lines as one article, lock them, and start the\n"
-            "next article at the first line you did not select (Ctrl+Return)."
-        )
-        self.finish_selection_btn.clicked.connect(self.finish_selected_article)
-        review_btn = QPushButton("Next Review Item")
-        review_btn.setToolTip("Jump to the next block the auto-refiner flagged for review.")
-        review_btn.clicked.connect(self.goto_next_review_item)
         action_buttons = [
             load_btn,
             merge_btn,
@@ -288,9 +283,6 @@ class MainWindow(QMainWindow):
             xml_btn,
             self.view_xml_btn,
             json_btn,
-            auto_pipeline_btn,
-            self.finish_selection_btn,
-            review_btn,
             self.finish_article_btn,
             self.reopen_article_btn,
         ]
@@ -406,10 +398,6 @@ class MainWindow(QMainWindow):
         # reachable from the keyboard as well as by button and right-click.
         self.split_shortcut = QShortcut(QKeySequence("Ctrl+Shift+N"), self)
         self.split_shortcut.activated.connect(self.split_article_at_selection)
-        # Finishing one article and starting the next is the whole multi-article
-        # loop, so it is reachable without leaving the keyboard.
-        self.finish_selection_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
-        self.finish_selection_shortcut.activated.connect(self.finish_selected_article)
         # Processing a PDF of several articles is mostly a sequence of articles,
         # so stepping to the next one should not require aiming at a tab.
         self.next_article_shortcut = QShortcut(QKeySequence("Alt+Right"), self)
@@ -1837,11 +1825,16 @@ class MainWindow(QMainWindow):
         )
         if confirm != QMessageBox.Yes:
             return
-        suggested = self._suggested_article_xml_path(segment)
-        output_path = self._choose_xml_path(suggested)
-        if output_path is None:
-            return
-        self._start_article_finish(segment, key, output_path)
+        try:
+            suggested = self._suggested_article_xml_path(segment)
+            output_path = self._choose_xml_path(suggested)
+            if output_path is None:
+                return
+            self._start_article_finish(segment, key, output_path)
+        except Exception as exc:
+            message = f"Could not start finishing the article: {exc}"
+            self._log(message)
+            QMessageBox.critical(self, "Article finish failed", message)
 
     def _suggested_article_xml_path(self, segment: dict[str, object]) -> Path:
         self._update_document_model()
@@ -1877,8 +1870,12 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._log, Qt.QueuedConnection)
         self._pending_article_finish = (dict(segment), key, output_path)
         worker.finished.connect(self._on_article_finish_worker_complete, Qt.QueuedConnection)
-        worker.finished.connect(thread.quit)
+        # QThread objects live on the GUI thread, so an AutoConnection can queue
+        # quit() behind the GUI completion callback. Quit the worker event loop
+        # directly as soon as inference completes; QThread.quit() is thread-safe.
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
         worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_article_finish_thread_stopped, Qt.QueuedConnection)
         thread.finished.connect(thread.deleteLater)
         self._article_finish_thread = thread
         self._article_finish_worker = worker
@@ -1894,10 +1891,26 @@ class MainWindow(QMainWindow):
         if pending is None:
             return
         segment, key, output_path = pending
-        self._on_article_finish_complete(segment, key, (response, output_path), error)
+        try:
+            self._on_article_finish_complete(segment, key, (response, output_path), error)
+        except Exception as exc:
+            # Exceptions escaping a Qt slot can terminate the whole application
+            # in some PySide builds. Keep unexpected UI/export follow-up errors
+            # visible in the Processing Log and let the application continue.
+            self._set_article_finish_busy(False)
+            message = f"Unexpected error while finishing article: {exc}"
+            self._log(message)
+            QMessageBox.critical(self, "Article finish failed", message)
+
+    @Slot()
+    def _on_article_finish_thread_stopped(self) -> None:
+        """Release thread wrappers only after Qt confirms the worker has stopped."""
+
+        self._article_finish_thread = None
+        self._article_finish_worker = None
 
     def _set_article_finish_busy(self, busy: bool) -> None:
-        for name in ("finish_article_btn", "finish_selection_btn", "classify_btn"):
+        for name in ("finish_article_btn", "classify_btn"):
             button = getattr(self, name, None)
             if button is not None:
                 button.setEnabled(not busy)
@@ -1907,8 +1920,6 @@ class MainWindow(QMainWindow):
         self, segment: dict[str, object], key: str | None, result, error
     ) -> None:
         self._set_article_finish_busy(False)
-        self._article_finish_thread = None
-        self._article_finish_worker = None
         response, output_path = result
         if error is not None:
             self._log(f"Qwen/OpenRouter failed; keeping heuristic author links: {error}")
@@ -3699,6 +3710,7 @@ class MainWindow(QMainWindow):
             if not is_abstract_heading(b.text)
         )
         self.document.abstract = abstract_text
+        self.document.metadata["keywords"] = self._keywords_from_blocks(blocks)
         author_blocks = [b for b in blocks if b.role in {"author", "corresponding_author", "author_affiliation"}]
         author_blocks.sort(key=reading_order_key)
         affiliation_blocks = [b for b in blocks if b.role == "affiliation"]
@@ -3824,6 +3836,7 @@ class MainWindow(QMainWindow):
                 )
             )
         metadata = dict(source.metadata)
+        metadata["keywords"] = self._keywords_from_blocks(blocks)
         metadata["abstract_number"] = str(segment.get("abstract_number") or "ABSN")
         # A hand-made article usually has no marker block to exclude.
         marker_id = str(segment.get("abstract_number_block_id") or "")
@@ -3870,6 +3883,25 @@ class MainWindow(QMainWindow):
             references=list(source.references),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _keywords_from_blocks(blocks) -> list[str]:
+        """Extract individual keyword phrases from blocks assigned keywords."""
+
+        terms: list[str] = []
+        seen: set[str] = set()
+        for block in sorted(
+            (item for item in blocks if item.role == "keywords"),
+            key=reading_order_key,
+        ):
+            text = re.sub(r"^\s*(?:key\s*words?|keywords?)\s*[:\-]\s*", "", block.text, flags=re.IGNORECASE)
+            for term in re.split(r"\s*[;,]\s*", text):
+                term = " ".join(term.split()).strip(" ,;.")
+                normalized = term.casefold()
+                if term and normalized not in seen:
+                    terms.append(term)
+                    seen.add(normalized)
+        return terms
 
     def _article_starts(self) -> bool:
         """Whether the loaded PDF already has an article the user can work on.

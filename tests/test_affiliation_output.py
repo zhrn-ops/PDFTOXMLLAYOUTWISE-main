@@ -113,6 +113,35 @@ def test_linker_order_drives_the_group_order(tmp_path):
     assert [_organization(group) for group in groups] == ["Beta University", "Alpha University"]
 
 
+def test_given_names_are_written_to_ce_given_name(tmp_path):
+    groups = _groups(
+        tmp_path,
+        _document(
+            [Author(initials="J.Q.", given_names="Jane Q.", surname="Doe", display_name="Jane Q. Doe")],
+            [],
+        ),
+    )
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    given_name = author.find(_ce("given-name"))
+    assert given_name is not None
+    assert given_name.text == "Jane Q."
+
+
+def test_given_name_is_inferred_when_missing(tmp_path):
+    groups = _groups(
+        tmp_path,
+        _document([Author(initials="J.", surname="Doe", display_name="Jane Doe")], []),
+    )
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    given_name = author.find(_ce("given-name"))
+    assert given_name is not None
+    assert given_name.text == "Jane"
+
+
 def test_glued_affiliation_labels_are_detected():
     linked = AuthorLinker().link_from_texts(
         ["Jane Doe1", "John Smith21"],

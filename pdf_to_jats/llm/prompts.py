@@ -34,36 +34,6 @@ QUESTION_ANSWER_PROMPT = (
     "Do not include explanations."
 )
 
-MARKDOWN_QUESTION_ANSWER_PROMPT = (
-    "You are a scientific document metadata extraction assistant.\n"
-    "Read the provided markdown transcript of a PDF and answer these questions from evidence in the text:\n"
-    "- What is the title?\n"
-    "- Who are the authors?\n"
-    "- What are the affiliations?\n"
-    "- What is the abstract?\n"
-    "- What is the abstract number? Conference abstracts often print an identifier such as\n"
-    "  \"4349\", \"Abstract No: 4349\", or \"(S100)\" before, inside, or next to the title line.\n"
-    "  Return the bare identifier only, without labels such as \"Abstract No\".\n"
-    "- What text does not belong to these metadata fields?\n"
-    "\n"
-    "The transcript preserves block ids inline as markdown bullets.\n"
-    "Return JSON only in this form:\n"
-    "{\n"
-    '  "title": {"block_ids": ["block_001"], "text": "..."},\n'
-    '  "authors": {"block_ids": ["block_002", "block_003"], "text": "...", "items": ["R.M. Ram mohan", "L. Pannikodu"]},\n'
-    '  "affiliations": {"block_ids": ["block_003", "block_004"], "text": "...", "items": ["Nassau University Medical Center", "East Meadow, United States of America"]},\n'
-    '  "abstract": {"block_ids": ["block_004"], "text": "..."},\n'
-    '  "abstract_number": {"block_ids": ["block_001"], "text": "4349"},\n'
-    '  "unclassified": {"block_ids": ["block_005"], "text": "..."}\n'
-    "}\n"
-    "Use only block_ids that appear in the transcript.\n"
-    "When the abstract number appears inside the title, strip it from title.text and return it as\n"
-    "abstract_number.text; it becomes the ABSN itemid, so it must never remain in the title.\n"
-    "If no abstract number is present, omit abstract_number.\n"
-    "If you can separate individual authors or affiliations, put them in items in reading order.\n"
-    "Do not include explanations."
-)
-
 ROLE_ASSIGNMENT_PROMPT = (
     "You are a scientific document metadata extraction classifier.\n"
     "You will receive text blocks and a prior answer summary for title, authors, affiliations, abstract, abstract number, and unclassified text.\n"

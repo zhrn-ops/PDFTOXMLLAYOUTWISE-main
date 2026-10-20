@@ -47,7 +47,10 @@ _AUTHOR_INSTITUTION_SPLIT = re.compile(r",\s*(?=(?:[A-Z][A-Za-z\u00c0-\u024f'\u2
 # "Headache Center" when its line is treated as an address.
 _INSTITUTION_WORDS = re.compile(
     r"\b(?:university|universit\u00e4t|universidad|institute|hospital|college|center|centre|school|"
-    r"laborator|foundation|fundaci(?:o|\u00f3)n|department|academy|medical|clinic|health|society|association)\b",
+    r"laborator|foundation|fundaci(?:o|\u00f3)n|department|academy|medical|clinic|health|society|association|"
+    r"radiology|radiologic|oncology|neurology|cardiology|pediatrics|paediatrics|surgery|pathology|"
+    r"dermatology|psychiatry|anesthesiology|anaesthesiology|orthopedics|orthopaedics|urology|"
+    r"ophthalmology|obstetrics|gynecology|gynaecology|imaging|oncologic|neurosurgery)\b",
     re.IGNORECASE,
 )
 
@@ -484,7 +487,20 @@ class AuthorLinker:
 
         # Printed markers win; the institution sharing the author's line fills
         # in the links the citation never printed.
+        authors_per_entry: dict[int, int] = {}
+        for _name, _markers, entry_index, _degrees in parsed:
+            authors_per_entry[entry_index] = authors_per_entry.get(entry_index, 0) + 1
         for author, (_name, _markers, entry_index, _degrees) in zip(authors, parsed):
+            if (
+                authors_per_entry.get(entry_index, 0) > 1
+                and len(embedded_ids.get(entry_index, ())) > 1
+                and author.markers
+            ):
+                # A flattened marked byline may contain several authors and
+                # several numbered affiliations. Their printed markers define
+                # the links; assigning every embedded affiliation to every
+                # author would erase that mapping.
+                continue
             for affiliation_id in embedded_ids.get(entry_index, ()):
                 if affiliation_id not in author.affiliation_ids:
                     author.affiliation_ids.append(affiliation_id)
@@ -567,6 +583,10 @@ class AuthorLinker:
     def _split_entry(self, entry: str) -> tuple[list[str], list[str]]:
         """Split one entry into its names and its affiliations."""
 
+        inline_numbered = self._split_inline_numbered_affiliations(entry)
+        if inline_numbered:
+            return inline_numbered
+
         names, institutions = split_author_institution(entry)
         if institutions:
             return names, institutions
@@ -601,6 +621,35 @@ class AuthorLinker:
             # rule hand Boston University to A. Lee.
             return [head], [tail]
         return names, institutions
+
+    @staticmethod
+    def _split_inline_numbered_affiliations(entry: str) -> tuple[list[str], list[str]] | None:
+        """Separate a numbered affiliation run appended to a comma-separated byline.
+
+        Some PDFs flatten ``Author1, Author2 1Institution..., 2Institution...``
+        into one line. The affiliation labels are separated from author markers
+        by whitespace, while author markers are usually glued to a surname.
+        """
+
+        text = " ".join(str(entry or "").split())
+        starts: list[re.Match[str]] = []
+        for match in re.finditer(r"(?<!\S)(?P<label>\d{1,3})(?=[A-Z])", text):
+            following = text[match.end():match.end() + 100]
+            if _INSTITUTION_WORDS.search(following):
+                starts.append(match)
+        if not starts:
+            return None
+
+        first = starts[0]
+        author_text = text[:first.start()].strip(" ,;")
+        if not author_text:
+            return None
+        affiliations = [
+            text[match.start():starts[index + 1].start() if index + 1 < len(starts) else len(text)].strip(" ,;")
+            for index, match in enumerate(starts)
+        ]
+        affiliations = [value for value in affiliations if value]
+        return ([author_text], affiliations) if affiliations else None
 
     def _split_address_entry(self, entry: str) -> tuple[list[str], list[str]]:
         """Keep a personal name in front of an address, else keep it as text."""
@@ -1249,6 +1298,10 @@ class AuthorLinker:
         if last_word in {
             "university", "institute", "hospital", "college", "center", "centre",
             "school", "laboratory", "department", "foundation", "academy", "institut",
+            "radiology", "radiologic", "oncology", "neurology", "cardiology", "pediatrics",
+            "paediatrics", "surgery", "pathology", "dermatology", "psychiatry", "anesthesiology",
+            "anaesthesiology", "orthopedics", "orthopaedics", "urology", "ophthalmology",
+            "obstetrics", "gynecology", "gynaecology", "imaging", "neurosurgery",
         }:
             return False
         # Pure place-name fragments ("Philadelphia", "PA", "USA", "New York")

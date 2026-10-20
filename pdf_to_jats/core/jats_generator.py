@@ -132,9 +132,16 @@ class JATSGenerator:
                 author_el.set("seq", str(author_seq))
                 initials = self._sanitize_xml_text(author.initials)
                 surname = self._sanitize_xml_text(author.surname)
+                given_names = self._sanitize_xml_text(author.given_names)
                 if not initials or not surname:
-                    initials, surname = self._split_name(author.display_name or f"{author.initials} {author.surname}".strip())
+                    parsed_initials, parsed_given_names, parsed_surname = self._split_name(
+                        author.display_name or f"{author.initials} {author.surname}".strip()
+                    )
+                    initials = initials or parsed_initials
+                    given_names = given_names or parsed_given_names
+                    surname = surname or parsed_surname
                 etree.SubElement(author_el, self._qname("initials", self.CE_NS)).text = initials
+                etree.SubElement(author_el, self._qname("given-name", self.CE_NS)).text = given_names
                 etree.SubElement(author_el, self._qname("surname", self.CE_NS)).text = surname
                 if author.degrees.strip():
                     etree.SubElement(author_el, self._qname("degrees", self.CE_NS)).text = self._sanitize_xml_text(author.degrees)
@@ -151,6 +158,14 @@ class JATSGenerator:
             abstract.set(self._qname_attr("lang", "http://www.w3.org/XML/1998/namespace"), self._metadata_value(document, "language", "ENG"))
             para = etree.SubElement(abstract, self._qname("para", self.CE_NS))
             para.text = self._sanitize_para_text(document.abstract)
+
+        keywords = document.metadata.get("keywords", [])
+        if isinstance(keywords, list):
+            keyword_terms = [self._sanitize_xml_text(str(term)).strip() for term in keywords if str(term).strip()]
+            if keyword_terms:
+                author_keywords = etree.SubElement(head, self._qname("author-keywords"))
+                for term in keyword_terms:
+                    etree.SubElement(author_keywords, self._qname("author-keyword")).text = term
 
         source = etree.SubElement(head, self._qname("source"))
         source.set("srcid", self._metadata_value(document, "srcid", "000000000"))
@@ -234,17 +249,17 @@ class JATSGenerator:
             affiliation_el = etree.SubElement(correspondence, self._qname("affiliation"))
             self._append_affiliation_text(affiliation_el, affiliation.text)
 
-    def _split_name(self, full_name: str) -> tuple[str, str]:
+    def _split_name(self, full_name: str) -> tuple[str, str, str]:
         parts = [part for part in full_name.split() if part]
         if not parts:
-            return "", ""
+            return "", "", ""
         if len(parts) == 1:
-            return parts[0][:1].upper() + ".", parts[0]
+            return parts[0][:1].upper() + ".", parts[0], parts[0]
         particles = {"da", "das", "de", "del", "della", "der", "di", "do", "dos", "du", "la", "le", "van", "vander", "von"}
         surname_start = next((index for index, part in enumerate(parts[1:], start=1) if part.rstrip(".").lower() in particles), len(parts) - 1)
         given = parts[:surname_start]
         initials = "".join(f"{part[0].upper()}." for part in given)
-        return initials, " ".join(parts[surname_start:])
+        return initials, " ".join(given), " ".join(parts[surname_start:])
 
     def _split_affiliation(self, text: str) -> tuple[str, str, str]:
         # Keep the institutional hierarchy together. Earlier code treated
