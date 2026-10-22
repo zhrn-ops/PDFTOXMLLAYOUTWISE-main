@@ -1,6 +1,7 @@
 """Tests for affiliation author-group output and label parsing."""
 
 from lxml import etree
+import pytest
 
 from pdf_to_jats.core.author_linker import AuthorLinker
 from pdf_to_jats.core.jats_generator import JATSGenerator
@@ -10,6 +11,21 @@ from pdf_to_jats.models.document import Document
 
 ANI_NS = JATSGenerator.ANI_NS
 CE_NS = JATSGenerator.CE_NS
+
+
+@pytest.mark.parametrize("given,display,expected", [
+    ("Kate", "Kate Rowlandson", "Kate"),
+    ("", "Kate Rowlandson", "Kate"),
+    ("", "K. Rowlandson", None),
+])
+def test_correspondence_includes_known_given_name(given, display, expected):
+    author = Author(initials="K.", given_names=given, surname="Rowlandson", display_name=display)
+    document = Document(corresponding_author=author)
+    root = etree.Element("root")
+    JATSGenerator()._append_correspondence(root, document)
+    person = root.find(f"{{{ANI_NS}}}correspondence/{{{ANI_NS}}}person")
+    assert person.findtext(f"{{{CE_NS}}}given-name") == expected
+    assert person.findtext(f"{{{CE_NS}}}surname") == "Rowlandson"
 
 
 def _q(tag: str) -> str:
@@ -140,6 +156,106 @@ def test_given_name_is_inferred_when_missing(tmp_path):
     given_name = author.find(_ce("given-name"))
     assert given_name is not None
     assert given_name.text == "Jane"
+
+
+def test_given_name_fallback_does_not_expand_initials_or_conflicting_surnames(tmp_path):
+    for display_name in ("J. Doe", "Doe J.", "Jane Smith", ""):
+        groups = _groups(
+            tmp_path,
+            _document([Author(initials="J.", surname="Doe", display_name=display_name)], []),
+        )
+        author = groups[0].find(_q("author"))
+        assert author.find(_ce("given-name")) is None
+        assert author.find(_ce("initials")).text == "J."
+        assert author.find(_ce("surname")).text == "Doe"
+
+
+def test_given_name_only_emits_given_name_without_empty_name_elements(tmp_path):
+    groups = _groups(
+        tmp_path,
+        _document([Author(given_names="Jane", display_name="Jane")], []),
+    )
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    assert author.find(_ce("given-name")).text == "Jane"
+    assert author.find(_ce("initials")) is None
+    assert author.find(_ce("surname")) is None
+
+
+def test_initials_only_emits_initials_without_empty_name_elements(tmp_path):
+    groups = _groups(
+        tmp_path,
+        _document([Author(initials="J.Q.", display_name="J.Q.")], []),
+    )
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    assert author.find(_ce("initials")).text == "J.Q."
+    assert author.find(_ce("given-name")) is None
+    assert author.find(_ce("surname")) is None
+
+
+def test_given_name_only_handles_compound_names_and_absent_display_name(tmp_path):
+    for given_names, display_name in (("Mary Jane", "Mary Jane"), ("Jane", "")):
+        groups = _groups(tmp_path, _document(
+            [Author(given_names=given_names, display_name=display_name)], [],
+        ))
+        author = groups[0].find(_q("author"))
+        assert author.find(_ce("given-name")).text == given_names
+        assert author.find(_ce("initials")) is None
+        assert author.find(_ce("surname")) is None
+
+
+def test_initials_only_without_display_name_has_no_invented_name_fields(tmp_path):
+    groups = _groups(tmp_path, _document([Author(initials="J.Q.")], []))
+    author = groups[0].find(_q("author"))
+    assert author.find(_ce("initials")).text == "J.Q."
+    assert author.find(_ce("given-name")) is None
+    assert author.find(_ce("surname")) is None
+
+
+def test_initials_with_full_display_name_still_infers_surname(tmp_path):
+    groups = _groups(tmp_path, _document(
+        [Author(initials="J.Q.", display_name="J.Q. Doe")], [],
+    ))
+    author = groups[0].find(_q("author"))
+    assert author.find(_ce("initials")).text == "J.Q."
+    assert author.find(_ce("surname")).text == "Doe"
+    assert author.find(_ce("given-name")) is None
+
+
+def test_given_name_with_full_display_name_still_infers_surname(tmp_path):
+    groups = _groups(tmp_path, _document(
+        [Author(given_names="Jane", display_name="Jane Doe")], [],
+    ))
+    author = groups[0].find(_q("author"))
+    assert author.find(_ce("given-name")).text == "Jane"
+    assert author.find(_ce("surname")).text == "Doe"
+
+
+def test_pdf_initials_only_author_omits_given_name_element(tmp_path):
+    linked = AuthorLinker().link_from_texts(["Sheu J-Y1"], [])
+    groups = _groups(tmp_path, _document(linked.authors, linked.affiliations))
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    assert author.find(_ce("initials")).text == "JY."
+    assert author.find(_ce("surname")).text == "Sheu"
+    assert author.find(_ce("given-name")) is None
+
+
+def test_llm_initials_only_author_does_not_emit_given_name(tmp_path):
+    linked = AuthorLinker().link_from_llm_response(
+        {"authors": [{"display_name": "J-Y Sheu", "given_names": "J-Y", "initials": "J.-Y.", "surname": "Sheu"}]}
+    )
+    groups = _groups(tmp_path, _document(linked.authors, linked.affiliations))
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    assert author.find(_ce("initials")).text == "J.-Y."
+    assert author.find(_ce("surname")).text == "Sheu"
+    assert author.find(_ce("given-name")) is None
 
 
 def test_glued_affiliation_labels_are_detected():

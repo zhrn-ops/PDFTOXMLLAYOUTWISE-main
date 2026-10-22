@@ -26,7 +26,7 @@ class PrimaryLLMClient:
         report = progress or (lambda _message: None)
         report(f"Sending author/affiliation data to Qwen ({self.ollama.model})...")
         try:
-            response = self.ollama.classify(prompt, payload)
+            response = self.ollama.classify(prompt, payload, progress=report)
             report("Qwen returned a response.")
             return response
         except Exception as exc:

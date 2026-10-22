@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "active": null,
+  "articles": {},
+  "workflow": {
+    "document": {
+      "title": "Work in progress",
+      "authors": [],
+      "corresponding_author": null,
+      "affiliations": [],
+      "abstract": "",
+      "raw_blocks": [],
+      "blocks": [],
+      "paragraphs": [],
+      "zones": [],
+      "figures": [],
+      "tables": [],
+      "references": [],
+      "metadata": {}
+    },
+    "state": {
+      "_finished_segment_keys": [],
+      "_deleted_segment_keys": [],
+      "_current_segment_key": null,
+      "_article_draft_keys": {},
+      "_startup_flow": false,
+      "_explicit_number_workflow": false,
+      "_html_preview_merges": [],
+      "_manual_document_author_links": {}
+    },
+    "manual_links": [],
+    "linked_authors": {}
+  }
+}

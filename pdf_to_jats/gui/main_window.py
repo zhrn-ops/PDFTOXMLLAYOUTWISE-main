@@ -3,26 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from copy import deepcopy
+from pdf_to_jats.core.block_resize import split_resized_block
 import json
+import math
+import time
 import re
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QKeySequence, QPalette, QShortcut
+import fitz
+from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
     QComboBox,
     QFileDialog,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QMenu,
@@ -30,11 +33,12 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QPlainTextEdit,
+    QProgressDialog,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QTextEdit,
     QTextBrowser,
-    QToolButton,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -43,6 +47,12 @@ from PySide6.QtWidgets import (
 from pdf_to_jats.core.author_linker import AuthorLinker, LinkedAuthors
 from pdf_to_jats.core.auto_refiner import AutoRefiner, abstract_number_marker, is_abstract_heading
 from pdf_to_jats.core.jats_generator import JATSGenerator
+from pdf_to_jats.core.inline_script_detector import (
+    InlineScriptDetector,
+    join_text_and_runs,
+    normalize_inline_runs,
+    shift_trimmed_runs,
+)
 from pdf_to_jats.core.pdf_extractor import PDFExtractor
 from pdf_to_jats.core.paragraph_reconstructor import ParagraphReconstructor
 from pdf_to_jats.core.semantic_classifier import SemanticClassifier
@@ -63,6 +73,8 @@ from pdf_to_jats.gui.properties_panel import (
 )
 from pdf_to_jats.gui.structure_tree import StructureTree
 from pdf_to_jats.gui.styles import APP_STYLE
+from pdf_to_jats.gui.xml_correction_window import XmlCorrectionWindow
+from pdf_to_jats.core.workflow_state import capture_workflow, decode_workflow, STATE_FIELDS
 from pdf_to_jats.models.block import reading_order_key
 from pdf_to_jats.models.document import (
     Document,
@@ -80,7 +92,7 @@ from pdf_to_jats.models.segmentation import (
     common_column,
     legacy_segment_boundaries,
 )
-from pdf_to_jats.utils.config import load_config, save_openrouter_settings
+from pdf_to_jats.utils.config import load_config
 
 
 class GeneratedXmlWindow(QDialog):
@@ -127,7 +139,7 @@ class GeneratedXmlWindow(QDialog):
         try:
             self.editor.setPlainText(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError) as exc:
-            self.editor.setPlainText(f"Could not read generated XML:\n{exc}")
+            self.editor.setPlainText(f"Could not read generated XML:\r\n{exc}")
 
 
 class _ArticleFinishWorker(QObject):
@@ -159,6 +171,70 @@ class _ImmediateLLMClient:
         return self.response
 
 
+class _PdfLoadWorker(QObject):
+    finished = Signal(int, object, object)
+
+    def __init__(self, path: str, visible_text_only: bool, dark_threshold: int, generation: int) -> None:
+        super().__init__()
+        self.path = path
+        self.visible_text_only = visible_text_only
+        self.dark_threshold = dark_threshold
+        self.generation = generation
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            timings: dict[str, float] = {}
+            started = time.perf_counter()
+            document = PDFExtractor(
+                visible_text_only=self.visible_text_only,
+                dark_threshold=self.dark_threshold,
+                use_docling=False,
+            ).extract(self.path)
+            timings["PDF extraction"] = time.perf_counter() - started
+            started = time.perf_counter()
+            results = SemanticClassifier().classify_blocks(document.blocks)
+            for block, result in zip(document.blocks, results, strict=False):
+                block.role = result.role
+                block.confidence = result.confidence
+                block.metadata["role_source"] = "heuristic"
+            timings["Classification"] = time.perf_counter() - started
+            started = time.perf_counter()
+            report = AutoRefiner().refine(document.blocks)
+            timings["Auto-refinement"] = time.perf_counter() - started
+            document.metadata["source_path"] = self.path
+            document.metadata.pop("article_segments", None)
+            document.metadata.pop(MainWindow.DETECTED_SEGMENTS_KEY, None)
+            zones = [
+                DocumentZone(
+                    id=f"zone_auto_{index:03d}", page=block.page, label=block.role,
+                    bbox=list(block.bbox), source="auto",
+                )
+                for index, block in enumerate(document.blocks, start=1)
+                if block.role != "unclassified"
+            ]
+            document.zones = zones
+            with fitz.open(self.path) as pdf:
+                page_count = pdf.page_count
+                page_sizes = [(float(page.rect.width), float(page.rect.height)) for page in pdf]
+                first = pdf.load_page(0) if page_count else None
+                preview = None
+                if first is not None:
+                    pix = first.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
+                    preview = (pix.width, pix.height, pix.stride, bytes(pix.samples))
+            timings["PDF open and first page"] = time.perf_counter() - started
+            payload = [asdict(block) for block in document.blocks]
+            zone_payload = [asdict(zone) for zone in zones]
+            report_json = json.dumps(document.to_pipeline_report(), indent=2, ensure_ascii=False)
+            self.finished.emit(
+                self.generation,
+                (document, report, page_count, page_sizes, preview, payload, zone_payload, report_json, timings),
+                None,
+            )
+        except Exception as exc:
+            self.finished.emit(self.generation, None, exc)
+
+
 class MainWindow(QMainWindow):
     """Main window with extraction and export controls."""
 
@@ -168,6 +244,10 @@ class MainWindow(QMainWindow):
             event.ignore()
             message = "Finish Article is still processing; wait for it to complete before closing."
             self._log(message)
+            return
+        correction = getattr(self, "_xml_correction_window", None)
+        if correction is not None and not correction.confirm_close_drafts():
+            event.ignore()
             return
         super().closeEvent(event)
 
@@ -192,6 +272,7 @@ class MainWindow(QMainWindow):
         self.current_xml_path: Path | None = None
         self._generated_xml_paths: list[Path] = []
         self._generated_xml_window = None
+        self._xml_correction_window = None
         self._last_manual_merge: dict[str, object] | None = None
         self._redo_manual_merge: dict[str, object] | None = None
         self._html_preview_merges: list[tuple[str, ...]] = []
@@ -200,15 +281,20 @@ class MainWindow(QMainWindow):
         self._selected_zone_ids: set[str] = set()
         self._undo_stack: list[dict[str, object]] = []
         self._active_zone_move_undo_id: str | None = None
+        self._active_block_move_undo_id: str | None = None
         self._last_refine_report = None
         self._article_finish_thread = None
         self._article_finish_worker = None
         self._pending_article_finish = None
+        self._pdf_load_thread = None
+        self._pdf_load_worker = None
+        self._document_generation = 0
         self._review_block_ids: list[str] = []
         self._review_index = -1
         self._finished_segment_keys: list[str] = []
         self._deleted_segment_keys: list[str] = []
         self._current_segment_key: str | None = None
+        self._article_draft_keys: dict[str, str] = {}
         # Set only by the normal PDF load path.  Keeping it separate from
         # ``_startup_flow`` lets older documents and headless workflow tests
         # retain their legacy detector-segment behavior.
@@ -242,109 +328,120 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget()
-        self.setCentralWidget(central)
+        self.pages = QStackedWidget()
+        self.converter_page = central
+        self.pages.addWidget(central)
+        dashboard = QWidget()
+        dashboard_layout = QHBoxLayout(dashboard)
+        dashboard_layout.setContentsMargins(10, 10, 10, 10)
+        dashboard_layout.setSpacing(10)
+        self.workflow_sidebar = QWidget()
+        self.workflow_sidebar.setFixedWidth(184)
+        self.workflow_sidebar.setObjectName("workflowSidebar")
+        workflow_layout = QVBoxLayout(self.workflow_sidebar)
+        workflow_layout.setContentsMargins(10, 14, 10, 10)
+        brand = QLabel("PDF to XML")
+        brand.setObjectName("brand")
+        workflow_layout.addWidget(brand)
+        subtitle = QLabel("Scientific article converter")
+        subtitle.setWordWrap(True)
+        subtitle.setObjectName("muted")
+        workflow_layout.addWidget(subtitle)
+        workflow_layout.addSpacing(28)
+        workflow_label = QLabel("WORKFLOW")
+        workflow_label.setObjectName("eyebrow")
+        workflow_layout.addWidget(workflow_label)
+        self.convert_step_btn = QPushButton("1   Convert PDF")
+        self.convert_step_btn.setCheckable(True)
+        self.convert_step_btn.setChecked(True)
+        self.convert_step_btn.clicked.connect(self.show_converter_page)
+        self.correct_step_btn = QPushButton("2   Correct XML")
+        self.correct_step_btn.setCheckable(True)
+        self.correct_step_btn.clicked.connect(lambda _checked=False: self.open_xml_correction())
+        for step_button in (self.convert_step_btn, self.correct_step_btn):
+            step_button.setMinimumHeight(42)
+            step_button.setStyleSheet(
+                "QPushButton{ text-align:left; padding:8px; background:#102137; }"
+                "QPushButton:checked{ background:#0874d1; border-color:#1689ef; }"
+            )
+            workflow_layout.addWidget(step_button)
+        workflow_layout.addStretch(1)
+        workflow_help = QLabel("Convert your PDF, then review and save the XML.")
+        workflow_help.setWordWrap(True)
+        workflow_help.setObjectName("muted")
+        workflow_layout.addWidget(workflow_help)
+        dashboard_layout.addWidget(self.workflow_sidebar)
+        dashboard_layout.addWidget(self.pages, 1)
+        self.setCentralWidget(dashboard)
         root = QVBoxLayout(central)
+        root.setContentsMargins(12, 8, 4, 4)
+        root.setSpacing(14)
 
-        actions = QGridLayout()
-        load_btn = QPushButton("Browse PDF")
+        header = QHBoxLayout()
+        heading = QVBoxLayout()
+        title = QLabel("Document workspace")
+        title.setObjectName("pageTitle")
+        heading.addWidget(title)
+        self.pdf_filename_label = QLabel("Open a PDF to start building your article XML")
+        self.pdf_filename_label.setObjectName("muted")
+        self.pdf_filename_label.setWordWrap(True)
+        self.pdf_filename_label.setTextFormat(Qt.PlainText)
+        self.pdf_filename_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        heading.addWidget(self.pdf_filename_label)
+        header.addLayout(heading, 1)
+        load_btn = QPushButton("Open PDF")
+        load_btn.setObjectName("primaryButton")
         load_btn.clicked.connect(self.load_pdf)
-        merge_btn = QPushButton("Merge Selected")
+        header.addWidget(load_btn)
+        open_drafts_btn = QPushButton("Open Drafts")
+        open_drafts_btn.clicked.connect(lambda: self._xml_correction_window.open_drafts())
+        header.addWidget(open_drafts_btn)
+        save_drafts_btn = QPushButton("Save Draft")
+        save_drafts_btn.clicked.connect(lambda: self._xml_correction_window.save_draft())
+        header.addWidget(save_drafts_btn)
+        root.addLayout(header)
+        self.edit_toolbar = QWidget()
+        actions = QHBoxLayout(self.edit_toolbar)
+        actions.setContentsMargins(0, 0, 0, 0)
+        merge_btn = QPushButton("Merge")
+        merge_btn.setToolTip("Merge selected text blocks")
         merge_btn.clicked.connect(self.merge_selected_blocks)
         continue_btn = QPushButton("Continue Paragraph")
         continue_btn.clicked.connect(self.continue_selected_paragraphs)
-        classify_btn = QPushButton("Classify Selected")
+        classify_btn = QPushButton("Classify")
+        classify_btn.setToolTip("Classify selected text blocks")
         classify_btn.clicked.connect(self.classify_selected_blocks)
-        unmerge_btn = QPushButton("Undo Merge")
+        unmerge_btn = QPushButton("Undo")
+        unmerge_btn.setToolTip("Undo merge")
+        unmerge_btn.setAccessibleName("Undo merge")
         unmerge_btn.clicked.connect(self.undo_last_merge)
-        redo_btn = QPushButton("Redo Merge")
+        redo_btn = QPushButton("Redo")
+        redo_btn.setToolTip("Redo merge")
+        redo_btn.setAccessibleName("Redo merge")
         redo_btn.clicked.connect(self.redo_last_merge)
-        xml_btn = QPushButton("Generate XML...")
-        xml_btn.clicked.connect(self.generate_xml)
-        self.view_xml_btn = QPushButton("View XML")
-        self.view_xml_btn.setEnabled(False)
-        self.view_xml_btn.clicked.connect(self.view_generated_xml)
-        json_btn = QPushButton("Export JSON...")
-        json_btn.clicked.connect(self.export_json)
-        self.finish_article_btn = QPushButton("Finish Article")
+        self.view_xml_btn = None
+        self.finish_article_btn = QPushButton("Review XML")
         self.finish_article_btn.setToolTip(
-            "Export the current article to XML, mark it finished, and lock its fields."
+            "Finish the current article in memory. Validate and export its XML from XML Correction."
         )
         self.finish_article_btn.clicked.connect(self.finish_current_article)
-        self.reopen_article_btn = QPushButton("Reopen Article")
+        self.reopen_article_btn = QPushButton("Edit PDF Selection")
         self.reopen_article_btn.setToolTip("Unlock a finished article so it can be edited again.")
         self.reopen_article_btn.clicked.connect(self.reopen_current_article)
         action_buttons = [
-            load_btn,
             merge_btn,
             continue_btn,
             classify_btn,
             unmerge_btn,
             redo_btn,
-            xml_btn,
-            self.view_xml_btn,
-            json_btn,
-            self.finish_article_btn,
-            self.reopen_article_btn,
         ]
-        for index, button in enumerate(action_buttons):
-            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            actions.addWidget(button, index // 4, index % 4)
-        for column in range(4):
-            actions.setColumnStretch(column, 1)
-        root.addLayout(actions)
+        for button in action_buttons:
+            actions.addWidget(button)
+        actions.addStretch(1)
+        self.edit_toolbar.hide()
+        root.addWidget(self.edit_toolbar)
 
-        self.openrouter_box = QGroupBox("OpenRouter")
-        self.openrouter_box.setCheckable(True)
-        self.openrouter_box.setChecked(False)
-        openrouter_box_layout = QVBoxLayout(self.openrouter_box)
-        self.openrouter_settings_panel = QWidget()
-        openrouter_layout = QFormLayout(self.openrouter_settings_panel)
-        self.openrouter_api_key_edit = QLineEdit(self.config.openrouter_api_key)
-        self.openrouter_api_key_edit.setEchoMode(QLineEdit.Password)
-        self.openrouter_api_key_edit.setPlaceholderText("sk-or-v1-...")
-        api_key_container = QWidget()
-        api_key_layout = QHBoxLayout(api_key_container)
-        api_key_layout.setContentsMargins(0, 0, 0, 0)
-        api_key_layout.addWidget(self.openrouter_api_key_edit, 1)
-        self.show_api_key_btn = QToolButton()
-        self.show_api_key_btn.setText("Show")
-        self.show_api_key_btn.setCheckable(True)
-        self.show_api_key_btn.setToolTip("Show or hide the API key")
-        self.show_api_key_btn.toggled.connect(self._toggle_api_key_visibility)
-        api_key_layout.addWidget(self.show_api_key_btn)
-        self.openrouter_model_edit = QLineEdit(self.config.openrouter_model)
-        self.openrouter_model_edit.setPlaceholderText("openrouter/free")
-        self.openrouter_fallback_models_edit = QLineEdit(self.config.openrouter_fallback_models)
-        self.openrouter_fallback_models_edit.setPlaceholderText(
-            "model-a:free, model-b:free"
-        )
-        for field in (
-            self.openrouter_api_key_edit,
-            self.openrouter_model_edit,
-            self.openrouter_fallback_models_edit,
-        ):
-            palette = field.palette()
-            palette.setColor(QPalette.ColorRole.Text, QColor("#e6e6e6"))
-            palette.setColor(QPalette.ColorRole.Base, QColor("#303030"))
-            field.setPalette(palette)
-        openrouter_buttons = QHBoxLayout()
-        apply_openrouter_btn = QPushButton("Apply")
-        apply_openrouter_btn.clicked.connect(self.apply_openrouter_settings)
-        test_openrouter_btn = QPushButton("Test")
-        test_openrouter_btn.clicked.connect(self.test_openrouter_settings)
-        openrouter_buttons.addWidget(apply_openrouter_btn)
-        openrouter_buttons.addWidget(test_openrouter_btn)
-        openrouter_buttons.addStretch(1)
-        openrouter_layout.addRow("API key", api_key_container)
-        openrouter_layout.addRow("Model", self.openrouter_model_edit)
-        openrouter_layout.addRow("Fallbacks", self.openrouter_fallback_models_edit)
-        openrouter_layout.addRow(openrouter_buttons)
-        openrouter_box_layout.addWidget(self.openrouter_settings_panel)
-        self.openrouter_box.toggled.connect(self._set_openrouter_settings_visible)
-        self._set_openrouter_settings_visible(False)
-        root.addWidget(self.openrouter_box)
-
-        self.viewer = PDFViewer()
+        self.viewer = PDFViewer(text_blocks_only=True)
         self.html_preview = QTextBrowser()
         self.html_preview.setOpenLinks(False)
         self.html_preview.setStyleSheet(
@@ -386,11 +483,15 @@ class MainWindow(QMainWindow):
         self.viewer.label.blockRangeSelected.connect(self._on_viewer_block_range_selected)
         self.viewer.label.blocksRectSelected.connect(self._on_viewer_blocks_rect_selected)
         self.viewer.label.blockContextRequested.connect(self._show_block_article_menu)
+        self.viewer.label.blockMoved.connect(self._on_viewer_block_moved)
+        self.viewer.label.blockPieceMoved.connect(self._on_viewer_block_piece_moved)
+        self.viewer.label.blockEditFinished.connect(self._on_viewer_block_edit_finished)
         self.viewer.label.zoneSelected.connect(self._on_viewer_zone_selected)
         self.viewer.label.zoneMoved.connect(self._on_viewer_zone_moved)
         self.viewer.label.zoneCreated.connect(self._on_viewer_zone_created)
         self.viewer.label.zoneEditFinished.connect(self._on_viewer_zone_edit_finished)
-        self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self.converter_page)
+        self.undo_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.undo_shortcut.activated.connect(self.undo_last_action)
         self.continuation_preview_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
         self.continuation_preview_shortcut.activated.connect(self.show_selected_continuation_arrow)
@@ -407,7 +508,34 @@ class MainWindow(QMainWindow):
         viewer_column = QWidget()
         viewer_layout = QVBoxLayout(viewer_column)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
-        viewer_layout.addWidget(self.viewer)
+        self.document_stack = QStackedWidget()
+        empty_page = QWidget()
+        empty_page.setObjectName("emptyPage")
+        empty_layout = QVBoxLayout(empty_page)
+        empty_layout.setContentsMargins(24, 24, 24, 24)
+        empty_layout.addStretch()
+        for text, name in (("PDF → XML", "emptyBadge"),
+                           ("Your next article starts here", "emptyTitle"),
+                           ("Open a scientific PDF to review its text,\norganize articles, and prepare structured XML.", "muted")):
+            label = QLabel(text)
+            label.setObjectName(name)
+            label.setAlignment(Qt.AlignCenter)
+            label.setWordWrap(True)
+            empty_layout.addWidget(label)
+        empty_layout.addSpacing(18)
+        empty_open = QPushButton("Open PDF")
+        empty_open.setObjectName("primaryButton")
+        empty_open.clicked.connect(self.load_pdf)
+        empty_layout.addWidget(empty_open, 0, Qt.AlignHCenter)
+        drop_hint = QLabel("You can also drop a PDF anywhere in this window")
+        drop_hint.setObjectName("muted")
+        drop_hint.setAlignment(Qt.AlignCenter)
+        drop_hint.setWordWrap(True)
+        empty_layout.addWidget(drop_hint)
+        empty_layout.addStretch()
+        self.document_stack.addWidget(empty_page)
+        self.document_stack.addWidget(self.viewer)
+        viewer_layout.addWidget(self.document_stack)
         self.articles_box = QGroupBox("Detected Articles")
         articles_layout = QVBoxLayout(self.articles_box)
         self.articles_hint = QLabel("Load a PDF to see detected articles.")
@@ -426,7 +554,7 @@ class MainWindow(QMainWindow):
         )
         self.split_segment_btn = QPushButton("Split Article Here")
         self.split_segment_btn.setToolTip(
-            "Start a new article at the selected block (Ctrl+Shift+N). Right-clicking\n"
+            "Start a new article at the selected block (Ctrl+Shift+N). Right-clicking\r\n"
             "a line in the page does the same thing without selecting it first."
         )
         self.split_segment_btn.setEnabled(False)
@@ -435,7 +563,7 @@ class MainWindow(QMainWindow):
         # wrong split, so it gets its own button instead of the picker dialog.
         self.merge_previous_btn = QPushButton("Merge Into Previous")
         self.merge_previous_btn.setToolTip(
-            "Fold the current article into the one before it, undoing a split that\n"
+            "Fold the current article into the one before it, undoing a split that\r\n"
             "cut an article in two. Ctrl+Z also undoes a split or merge."
         )
         self.merge_previous_btn.setEnabled(False)
@@ -448,17 +576,20 @@ class MainWindow(QMainWindow):
         self.merge_segments_btn.clicked.connect(self.merge_selected_segments)
         self.delete_article_btn = QPushButton("Delete Article")
         self.delete_article_btn.setToolTip(
-            "Remove the current article from Detected Articles and every export.\n"
+            "Remove the current article from Detected Articles and every export.\r\n"
             "Right-click the article's first line in the page to restore it. Ctrl+Z undoes."
         )
         self.delete_article_btn.setEnabled(False)
         self.delete_article_btn.clicked.connect(self.delete_current_article)
         articles_layout.addWidget(self.articles_hint)
         articles_layout.addWidget(self.articles_tabs, 1)
-        articles_layout.addWidget(self.split_segment_btn)
-        articles_layout.addWidget(self.merge_previous_btn)
-        articles_layout.addWidget(self.merge_segments_btn)
-        articles_layout.addWidget(self.delete_article_btn)
+        self.finish_article_btn.setObjectName("primaryButton")
+        article_actions = QGridLayout()
+        for index, button in enumerate((self.finish_article_btn, self.reopen_article_btn,
+                                        self.split_segment_btn, self.merge_previous_btn,
+                                        self.merge_segments_btn, self.delete_article_btn)):
+            article_actions.addWidget(button, index // 2, index % 2)
+        articles_layout.addLayout(article_actions)
 
         selected_column = QWidget()
         selected_layout = QVBoxLayout(selected_column)
@@ -478,14 +609,18 @@ class MainWindow(QMainWindow):
         # pane height instead of competing in one narrow column.
         self.work_tabs = QTabWidget()
         self.work_tabs.setDocumentMode(True)
-        self.work_tabs.addTab(self.articles_box, "Detected Articles")
-        self.work_tabs.addTab(selected_column, "Selected Blocks")
-        self.work_tabs.addTab(self.props, "Properties")
-        self.work_tabs.addTab(self.metadata_panel, "Article Metadata")
-        self.work_tabs.addTab(
-            self.author_affiliation_review_panel, "Author & Affiliation Review"
-        )
-        self.work_tabs.addTab(preview_page, "Preview")
+        self.selection_tabs = QTabWidget()
+        self.selection_tabs.setDocumentMode(True)
+        self.selection_tabs.addTab(selected_column, "Blocks")
+        self.selection_tabs.addTab(self.props, "Properties")
+        self.selection_tabs.addTab(preview_page, "Preview")
+        self.metadata_tabs = QTabWidget()
+        self.metadata_tabs.setDocumentMode(True)
+        self.metadata_tabs.addTab(self.metadata_panel, "Article details")
+        self.metadata_tabs.addTab(self.author_affiliation_review_panel, "Authors & affiliations")
+        self.work_tabs.addTab(self.articles_box, "Articles")
+        self.work_tabs.addTab(self.selection_tabs, "Selection")
+        self.work_tabs.addTab(self.metadata_tabs, "Metadata")
 
         self.body_splitter = QSplitter(Qt.Horizontal)
         self.body_splitter.addWidget(viewer_column)
@@ -502,10 +637,37 @@ class MainWindow(QMainWindow):
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("Processing log will appear here.")
         self.log.setMaximumHeight(140)
-        root.addWidget(QLabel("Processing Log"))
+        self.request_elapsed_label = QLabel()
+        self.request_elapsed_label.hide()
+        root.addWidget(self.request_elapsed_label)
+        self._request_elapsed_timer = QTimer(self)
+        self._request_elapsed_timer.setInterval(250)
+        self._request_elapsed_timer.timeout.connect(self._update_request_elapsed)
+        self._request_started_at = None
+        status_row = QHBoxLayout()
+        self.status_label = QLabel("Ready · No PDF loaded")
+        self.status_label.setObjectName("muted")
+        self.status_label.setMinimumWidth(0)
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        status_row.addWidget(self.status_label, 1)
+        self.log_toggle = QPushButton("Show processing log")
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.toggled.connect(self._toggle_processing_log)
+        status_row.addWidget(self.log_toggle)
+        root.addLayout(status_row)
         root.addWidget(self.log)
+        self.log.hide()
+        # Keep XML correction as a page in the converter's stacked central
+        # widget, even if the workspace is later given window-specific flags.
+        self._xml_correction_window = XmlCorrectionWindow(self)
+        self._xml_correction_window.setWindowFlags(Qt.Widget)
+        self.pages.addWidget(self._xml_correction_window)
 
-    # Tab indices of the right-side work-area tabs.
+    def _toggle_processing_log(self, expanded: bool) -> None:
+        self.log.setVisible(expanded)
+        self.log_toggle.setText("Hide processing log" if expanded else "Show processing log")
+
+    # Logical work areas, routed to the corresponding primary and detail tabs.
     TAB_ARTICLES = 0
     TAB_SELECTED = 1
     TAB_PROPERTIES = 2
@@ -521,7 +683,14 @@ class MainWindow(QMainWindow):
         """Bring one of the right-side work-area tabs to the front."""
 
         if hasattr(self, "work_tabs"):
-            self.work_tabs.setCurrentIndex(index)
+            if index in (self.TAB_SELECTED, self.TAB_PROPERTIES, self.TAB_PREVIEW):
+                self.work_tabs.setCurrentIndex(1)
+                self.selection_tabs.setCurrentIndex({self.TAB_SELECTED: 0, self.TAB_PROPERTIES: 1, self.TAB_PREVIEW: 2}[index])
+            elif index in (self.TAB_METADATA, self.TAB_AUTHOR_AFFILIATIONS):
+                self.work_tabs.setCurrentIndex(2)
+                self.metadata_tabs.setCurrentIndex(0 if index == self.TAB_METADATA else 1)
+            else:
+                self.work_tabs.setCurrentIndex(0)
 
     def _configured_openrouter_fallback_models(self) -> tuple[str, ...]:
         return tuple(
@@ -553,52 +722,6 @@ class MainWindow(QMainWindow):
                 else:
                     self.body_splitter.setSizes([620, 640])
         super().resizeEvent(event)
-
-    def _set_openrouter_settings_visible(self, visible: bool) -> None:
-        self.openrouter_settings_panel.setVisible(visible)
-
-    def _toggle_api_key_visibility(self, visible: bool) -> None:
-        self.openrouter_api_key_edit.setEchoMode(QLineEdit.Normal if visible else QLineEdit.Password)
-        self.show_api_key_btn.setText("Hide" if visible else "Show")
-
-    def apply_openrouter_settings(self) -> None:
-        self.config.openrouter_api_key = self.openrouter_api_key_edit.text().strip()
-        self.config.openrouter_model = self.openrouter_model_edit.text().strip() or "openrouter/free"
-        self.config.openrouter_fallback_models = self.openrouter_fallback_models_edit.text().strip()
-        save_openrouter_settings(self.config)
-        self.openrouter_client = self._create_llm_client()
-        key_label = self._masked_openrouter_key(self.config.openrouter_api_key)
-        self._log(
-            f"OpenRouter settings applied: model={self.config.openrouter_model}, key={key_label}"
-        )
-
-    def test_openrouter_settings(self) -> None:
-        self.apply_openrouter_settings()
-        try:
-            response = self.openrouter_client.classify(
-                prompt=(
-                    "Return exactly this JSON object and no extra text: "
-                    '{"assignments":[]}'
-                ),
-                payload={"blocks": []},
-            )
-        except OpenRouterRateLimitError as exc:
-            self._log(f"OpenRouter test rate-limited: {exc}")
-            QMessageBox.warning(self, "OpenRouter rate-limited", str(exc))
-            return
-        except Exception as exc:
-            self._log(f"OpenRouter test failed: {exc}")
-            QMessageBox.warning(self, "OpenRouter test failed", str(exc))
-            return
-        self._log(f"OpenRouter test succeeded: {response}")
-        QMessageBox.information(self, "OpenRouter test", "Connection test succeeded.")
-
-    def _masked_openrouter_key(self, api_key: str) -> str:
-        if not api_key:
-            return "not set"
-        if len(api_key) <= 12:
-            return "***"
-        return f"{api_key[:5]}...{api_key[-4:]}"
 
     def load_pdf(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
@@ -659,7 +782,7 @@ class MainWindow(QMainWindow):
             self._log(f"OpenRouter auto-classify failed: {exc}")
             self._log("Auto-classify skipped; heuristic roles remain.")
             return
-        
+
         changed_roles: dict[str, str] = {}
         for item in raw_response.get("assignments", []) if isinstance(raw_response, dict) else []:
             block_id = str(item.get("block_id", "")).strip()
@@ -704,120 +827,60 @@ class MainWindow(QMainWindow):
                 break
 
     def generate_xml(self) -> None:
+        """Prepare an XML draft in memory and open the correction workspace."""
+
         if self.document is None:
             QMessageBox.information(self, "No document", "Load a PDF first.")
             return
-        finished_segment = self._selected_finished_article()
-        if finished_segment is not None:
-            # A finished article has no active working segment, but Generate
-            # XML should still be able to write its already-reviewed XML again.
-            self._update_document_model()
-            export_document = self._document_with_html_preview_continuations()
-            segment_document = self._document_for_segment(finished_segment, export_document)
-            suggested = self.config.generated_xml_dir / self._article_filename(
-                segment_document, 1, 1
-            )
-            output_path = self._choose_xml_path(suggested)
-            if output_path is None:
-                return
-            generated_path = self.generator.generate(segment_document, output_path)
-            self.current_xml_path = generated_path
-            errors = self.validator.validate(generated_path)
-            for error in errors:
-                self._log(f"Validation error in {generated_path.name}: {error.message}")
-            if not errors:
-                self._log(f"XML written to {generated_path}")
-            self._show_generated_xml([generated_path])
-            return
-        if not self._article_starts():
-            selected = self._selected_contiguous_run()
-            if selected is None:
-                QMessageBox.information(
-                    self,
-                    "Select an article first",
-                    "Select the contiguous blocks that make up the article before exporting XML.",
-                )
-                return
-            QMessageBox.warning(
-                self,
-                "No abstract number",
-                "No abstract number has been entered. The selected blocks will be "
-                "exported as one XML file with ABSN as the identifier.",
-                QMessageBox.Ok,
-            )
-            self._update_document_model()
-            export_document = self._document_with_html_preview_continuations()
-            segment = {
-                "abstract_number": "ABSN",
-                "start_page": min(block.page for block in selected),
-                "end_page": max(block.page for block in selected),
-                "block_ids": [block.id for block in selected],
-            }
-            segment_document = self._document_for_segment(segment, export_document)
-            output_path = self._choose_xml_path(self.config.generated_xml_dir / "article.xml")
-            if output_path is None:
-                return
-            generated_path = self.generator.generate(segment_document, output_path)
-            self.current_xml_path = generated_path
-            errors = self.validator.validate(generated_path)
-            for error in errors:
-                self._log(f"Validation error in {generated_path.name}: {error.message}")
-            if not errors:
-                self._log(f"XML written to {generated_path}")
-            self._show_generated_xml([generated_path])
-            return
-        selected_blocks = [block for block in self.document.blocks if block.id in self._selected_block_ids]
-        if len(selected_blocks) >= 2:
-            valid_continuation, _reason = self._selection_looks_like_paragraph_continuation(selected_blocks)
-            if valid_continuation and not self._has_html_preview_continuation(
-                {block.id for block in selected_blocks}
-            ):
-                QMessageBox.information(
-                    self,
-                    "Continue paragraph first",
-                    "Click Continue Paragraph to add the selected blocks to the HTML preview before generating XML.",
-                )
-                return
+        self._stage_xml_for_correction()
+
+    def _stage_xml_for_correction(self, segment: dict[str, object] | None = None) -> bool:
+        """Build XML in memory and switch to the in-window correction workspace."""
+
+        if self.document is None:
+            return False
         self._update_document_model()
         export_document = self._document_with_html_preview_continuations()
-        validation_errors = self.validator.validate_document(export_document)
-        if validation_errors:
-            for error in validation_errors:
-                self._log(f"Document validation error: {error.message}")
-        all_segments = list(export_document.metadata.get("article_segments", []))
-        segments = self._exportable_segments(all_segments)
-        if not segments and all_segments:
-            # Every detected article is deleted or still only a suggestion, and a
-            # suggestion is never written out. Exporting the whole document here
-            # would resurrect exactly the articles the user has not vouched for.
-            self._log(
-                "No article is ready to export: every detected article is deleted or "
-                "still only a suggestion."
-            )
-            QMessageBox.information(
-                self,
-                "Nothing to export",
-                "Detection is only a suggestion. Finish an article, or build one from "
-                "a selection, before exporting. Deleted articles are always left out.",
-            )
-            return
-        documents = self._documents_to_export(export_document)
-        output_paths: list[Path] = []
-        for index, segment_document in enumerate(documents, start=1):
-            filename = self._article_filename(segment_document, index, len(documents))
-            output_path = self._choose_xml_path(self.config.generated_xml_dir / filename)
-            if output_path is None:
-                break
-            generated_path = self.generator.generate(segment_document, output_path)
-            output_paths.append(generated_path)
-            errors = self.validator.validate(generated_path)
-            if errors:
-                for error in errors:
-                    self._log(f"Validation error in {generated_path.name}: {error.message}")
-            else:
-                self._log(f"XML written to {generated_path}")
-        self.current_xml_path = output_paths[0] if output_paths else None
-        self._show_generated_xml(output_paths)
+        if segment is None:
+            current = self._current_segment()
+            if current is not None:
+                segment = current[0]
+        correction_document = (
+            self._document_for_segment(segment, export_document)
+            if segment is not None
+            else export_document
+        )
+        xml_text = self.generator.to_string(correction_document)
+        source_pdf = Path(str(self.document.metadata.get("source_pdf", "")))
+        base_name = source_pdf.stem if source_pdf.name else "article"
+        filename = self._article_filename(correction_document, 1, 1)
+        if segment is None and base_name:
+            filename = f"{base_name}.xml"
+        label_path = self.config.generated_xml_dir / filename
+        return self._show_xml_correction_text(
+            xml_text,
+            label_path,
+            source_pdf if source_pdf.is_file() else None,
+        )
+
+    def _show_xml_correction_text(
+        self,
+        xml_text: str,
+        label_path: Path,
+        source_pdf: Path | None = None,
+    ) -> bool:
+        """Display a generated XML draft without writing it to disk."""
+
+        correction = self._xml_correction_window
+        if not correction.load_xml_text(xml_text, label_path, source_pdf):
+            return False
+        self.current_xml_path = None
+        self._generated_xml_paths = []
+        self.pages.setCurrentWidget(correction)
+        self.convert_step_btn.setChecked(False)
+        self.correct_step_btn.setChecked(True)
+        self._log("XML draft prepared in memory. Validate it in XML Correction before exporting a copy.")
+        return True
 
     def _choose_xml_path(self, suggested_path: Path) -> Path | None:
         """Ask where to save one XML file, starting with a useful filename."""
@@ -844,11 +907,13 @@ class MainWindow(QMainWindow):
         button = getattr(self, "view_xml_btn", None)
         if button is not None:
             button.setEnabled(True)
-        window = getattr(self, "_generated_xml_window", None)
-        if window is None:
-            window = GeneratedXmlWindow(self)
-            self._generated_xml_window = window
-        window.show_files(valid_paths)
+        # XML correction is the next step after conversion. Load the first
+        # generated file and move to that workspace in the same main window.
+        correction = self._xml_correction_window
+        if correction.open_xml(valid_paths[0]):
+            self.pages.setCurrentWidget(correction)
+            self.convert_step_btn.setChecked(False)
+            self.correct_step_btn.setChecked(True)
 
     def view_generated_xml(self) -> None:
         paths = [path for path in self._generated_xml_paths if path.is_file()]
@@ -858,6 +923,64 @@ class MainWindow(QMainWindow):
             self._notify("Generate XML first to view the output.")
             return
         self._show_generated_xml(paths)
+
+    def open_xml_correction(self) -> None:
+        """Show the XML editor as another page in the main workflow."""
+        window = self._xml_correction_window
+        if self.document is not None and window.session is None:
+            self._notify("Finish an article first to prepare its XML draft for correction.")
+            return
+        if self.current_xml_path is not None and self.current_xml_path.is_file():
+            if window.session is None or window.session.path != self.current_xml_path:
+                if not window.open_xml(self.current_xml_path):
+                    return
+        source_pdf = None
+        if self.document is not None:
+            source = self.document.metadata.get("source_pdf") or self.document.metadata.get("source_path")
+            if source:
+                source_pdf = Path(str(source))
+        window.set_pdf_source(source_pdf)
+        self.pages.setCurrentWidget(window)
+        self.convert_step_btn.setChecked(False)
+        self.correct_step_btn.setChecked(True)
+
+    def show_converter_page(self) -> None:
+        """Return from XML correction to the converter without closing the app."""
+        if self._xml_correction_window is not None:
+            self._xml_correction_window._retain_draft()
+        self.pages.setCurrentWidget(self.converter_page)
+        self.correct_step_btn.setChecked(False)
+        self.convert_step_btn.setChecked(True)
+
+    def capture_workflow(self):
+        return capture_workflow(self)
+
+    def restore_workflow(self, data):
+        document, links = decode_workflow(data)
+        source = document.metadata.get("source_pdf") or document.metadata.get("source_path")
+        source_available = bool(source and Path(source).is_file())
+        if source_available:
+            self.viewer.load_pdf(source)
+        self._document_generation += 1
+        self.document = document
+        for name in STATE_FIELDS:
+            if name in data['state']:
+                setattr(self, name, data['state'][name])
+        self._llm_links_by_segment = links
+        self._manual_link_review_segments = set(data.get('manual_links', []))
+        self._selected_block_ids.clear()
+        self._selected_zone_ids.clear()
+        self._selected_zone_id = None
+        self._undo_stack.clear()
+        self._last_manual_merge = self._redo_manual_merge = None
+        self._active_block_move_undo_id = self._active_zone_move_undo_id = None
+        self._invalidate_segment_identity()
+        self.viewer.set_document_overlays([asdict(b) for b in document.blocks], [asdict(z) for z in document.zones])
+        self.pdf_filename_label.setText(f"PDF: {Path(source).name if source else 'Unavailable'}" + ("" if source_available else " — source file missing"))
+        self.pdf_filename_label.setToolTip(str(source))
+        self.document_stack.setCurrentIndex(1 if source_available else 0)
+        self.edit_toolbar.setVisible(source_available)
+        self._refresh_after_article_change()
 
     @staticmethod
     def _available_xml_path(path: Path) -> Path:
@@ -874,19 +997,29 @@ class MainWindow(QMainWindow):
             candidate = path.with_name(f"{base}_{index}{suffix}")
         return candidate
 
-    def _export_article_with_save_dialog(
+    def _prepare_article_xml_draft(
         self, segment: dict[str, object]
     ) -> tuple[Path | None, list]:
-        """Run the normal validated finish export with a user-selected path."""
+        """Prepare one article for correction without validating or writing it."""
 
-        self._prompt_for_article_xml_path = True
+        self._update_document_model()
+        export_document = self._document_with_html_preview_continuations()
+        segment_document = self._document_for_segment(segment, export_document)
+        self._link_authors_with_llm(segment, segment_document)
+        index_value = segment.get("index")
         try:
-            result = self._export_article_xml(segment)
-            if result[0] is not None and not result[1]:
-                self._show_generated_xml([result[0]])
-            return result
-        finally:
-            self._prompt_for_article_xml_path = False
+            index = int(index_value) if index_value is not None else 0
+        except (TypeError, ValueError):
+            index = 0
+        label_path = self.config.generated_xml_dir / self._article_filename(
+            segment_document, index, 1, always_number=index > 0
+        )
+        source_value = self.document.metadata.get("source_pdf") if self.document else None
+        source_pdf = Path(str(source_value)) if source_value else None
+        xml_text = self.generator.to_string(segment_document)
+        if not self._show_xml_correction_text(xml_text, label_path, source_pdf):
+            return None, []
+        return label_path, []
 
     def export_json(self) -> None:
         if self.document is None:
@@ -1047,6 +1180,9 @@ class MainWindow(QMainWindow):
             else:
                 merged_role = "unclassified"
             metadata = dict(first.metadata)
+            continued_text, continued_runs = join_text_and_runs(
+                [(block.text, block.inline_runs) for block in group_blocks], " "
+            )
             metadata.update(
                 {
                     "preview_source_block_ids": source_ids,
@@ -1065,7 +1201,8 @@ class MainWindow(QMainWindow):
             )
             virtual_blocks[first.id] = replace(
                 first,
-                text=" ".join(" ".join(block.text.split()) for block in group_blocks),
+                text=continued_text,
+                inline_runs=continued_runs,
                 bbox=[
                     min(block.bbox[0] for block in group_blocks),
                     min(block.bbox[1] for block in group_blocks),
@@ -1099,21 +1236,31 @@ class MainWindow(QMainWindow):
         source = self.document
         blocks = self._blocks_with_html_preview_continuations(source.blocks)
         visible_blocks = [block for block in blocks if not self._looks_like_footer_noise(block)]
+        title = self._compose_title(visible_blocks)
+        title_blocks = self._title_source_blocks(visible_blocks)
+        abstract_blocks = sorted(
+            (block for block in visible_blocks if block.role == "abstract" and block.text.strip() and not is_abstract_heading(block.text)),
+            key=reading_order_key,
+        )
+        abstract = "\r\n".join(self._sanitize_xml_text(block.text) for block in abstract_blocks)
+        metadata = dict(source.metadata)
+        metadata["title_script_runs"] = self._script_runs_for_blocks(
+            self._raw_script_sources(title_blocks, source.raw_blocks), title
+        )
+        metadata["abstract_script_runs"] = self._script_runs_for_blocks(
+            self._raw_script_sources(abstract_blocks, source.raw_blocks), abstract
+        )
         author_blocks = [
             block for block in visible_blocks if block.role in {"author", "corresponding_author", "author_affiliation"}
         ]
         affiliation_blocks = [block for block in visible_blocks if block.role == "affiliation"]
         linked = self.linker.link_from_blocks(author_blocks, affiliation_blocks)
         return Document(
-            title=self._compose_title(visible_blocks),
+            title=title,
             authors=linked.authors,
             corresponding_author=linked.corresponding_author,
             affiliations=linked.affiliations,
-            abstract="\n".join(
-                self._sanitize_xml_text(block.text)
-                for block in visible_blocks
-                if block.role == "abstract" and block.text.strip() and not is_abstract_heading(block.text)
-            ),
+            abstract=abstract,
             raw_blocks=[replace(block, metadata=dict(block.metadata)) for block in source.raw_blocks],
             blocks=blocks,
             paragraphs=(
@@ -1124,7 +1271,7 @@ class MainWindow(QMainWindow):
             figures=list(source.figures),
             tables=list(source.tables),
             references=list(source.references),
-            metadata=dict(source.metadata),
+            metadata=metadata,
         )
 
     @Slot(str)
@@ -1133,6 +1280,11 @@ class MainWindow(QMainWindow):
         if log is None:
             return
         log.append(message)
+        if hasattr(self, "status_label"):
+            self.status_label.setText(message.replace("\n", " "))
+            self.status_label.setToolTip(message)
+            if any(word in message.lower() for word in ("error", "failed", "could not")):
+                self.log_toggle.setChecked(True)
 
     def _update_html_preview(self) -> None:
         """Render blocks in backend reading order as selectable HTML."""
@@ -1185,8 +1337,8 @@ class MainWindow(QMainWindow):
                 for block_id in block_ids
             )
             item_deleted = any(block_id in self._deleted_view_block_ids for block_id in block_ids)
-            delete_prefix = "✕ " if item_deleted else ""
-            lock_prefix = f"{delete_prefix}🔒 " if item_locked else delete_prefix
+            delete_prefix = "? " if item_deleted else ""
+            lock_prefix = f"{delete_prefix}?? " if item_locked else delete_prefix
             if len(block_ids) == 1:
                 anchor = f"block-{block_ids[0]}"
                 label = (
@@ -1671,8 +1823,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Article finished",
-            f"{len(locked_blocks)} selected block(s) belong to a finished article.\n"
-            "Use Reopen Article to unlock it before editing.",
+            f"{len(locked_blocks)} selected block(s) belong to a finished article.\r\n"
+            "Use Edit PDF Selection to unlock it before editing.",
         )
 
     def _export_segment_document(
@@ -1783,7 +1935,12 @@ class MainWindow(QMainWindow):
         return unlocked_count
 
     def finish_current_article(self) -> None:
-        """Export the current article's XML, then lock its fields."""
+        """Prepare the current article's XML draft, then lock its fields."""
+
+        selected = self._segment_at_tab(self.articles_tabs.currentIndex())
+        if selected is not None and self._segment_key(selected) in self._finished_segment_keys:
+            if self.review_article_draft(selected):
+                return
 
         if self.document is None:
             self._notify("Load a PDF first.")
@@ -1814,11 +1971,12 @@ class MainWindow(QMainWindow):
             return
         confirm = QMessageBox.question(
             self,
-            "Finish article",
+            "Review article XML",
             (
                 f"Finish article {segment.get('abstract_number', '')!r} "
-                f"(pages {segment.get('start_page')}-{segment.get('end_page')})?\n\n"
-                "Its XML will be exported and its fields locked."
+                f"(pages {segment.get('start_page')}-{segment.get('end_page')})?\r\n\r\n"
+                "Its XML draft will open for editing. PDF blocks will be protected; "
+                "use Edit PDF Selection if extraction needs changes."
             ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
@@ -1826,31 +1984,14 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         try:
-            suggested = self._suggested_article_xml_path(segment)
-            output_path = self._choose_xml_path(suggested)
-            if output_path is None:
-                return
-            self._start_article_finish(segment, key, output_path)
+            self._start_article_finish(segment, key)
         except Exception as exc:
             message = f"Could not start finishing the article: {exc}"
             self._log(message)
             QMessageBox.critical(self, "Article finish failed", message)
 
-    def _suggested_article_xml_path(self, segment: dict[str, object]) -> Path:
-        self._update_document_model()
-        export_document = self._document_with_html_preview_continuations()
-        segment_document = self._document_for_segment(segment, export_document)
-        index_value = segment.get("index")
-        try:
-            index = int(index_value) if index_value is not None else 0
-        except (TypeError, ValueError):
-            index = 0
-        return self.config.generated_xml_dir / self._article_filename(
-            segment_document, index, 1, always_number=index > 0
-        )
-
     def _start_article_finish(
-        self, segment: dict[str, object], key: str | None, output_path: Path
+        self, segment: dict[str, object], key: str | None
     ) -> None:
         """Run slow model inference away from Qt's UI thread."""
 
@@ -1861,14 +2002,14 @@ class MainWindow(QMainWindow):
         payload = self._author_affiliation_payload(segment_document)
         if not payload or self._segment_key(segment) in getattr(self, "_manual_link_review_segments", set()):
             self._log("No LLM request needed; using the prepared article metadata.")
-            self._on_article_finish_complete(segment, key, ({}, output_path), None)
+            self._on_article_finish_complete(segment, key, {}, None)
             return
         thread = QThread(self)
         worker = _ArticleFinishWorker(self.openrouter_client, payload)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.progress.connect(self._log, Qt.QueuedConnection)
-        self._pending_article_finish = (dict(segment), key, output_path)
+        worker.progress.connect(self._on_request_progress, Qt.QueuedConnection)
+        self._pending_article_finish = (dict(segment), key)
         worker.finished.connect(self._on_article_finish_worker_complete, Qt.QueuedConnection)
         # QThread objects live on the GUI thread, so an AutoConnection can queue
         # quit() behind the GUI completion callback. Quit the worker event loop
@@ -1890,9 +2031,9 @@ class MainWindow(QMainWindow):
         self._pending_article_finish = None
         if pending is None:
             return
-        segment, key, output_path = pending
+        segment, key = pending
         try:
-            self._on_article_finish_complete(segment, key, (response, output_path), error)
+            self._on_article_finish_complete(segment, key, response, error)
         except Exception as exc:
             # Exceptions escaping a Qt slot can terminate the whole application
             # in some PySide builds. Keep unexpected UI/export follow-up errors
@@ -1910,58 +2051,190 @@ class MainWindow(QMainWindow):
         self._article_finish_worker = None
 
     def _set_article_finish_busy(self, busy: bool) -> None:
+        timer = getattr(self, "_request_elapsed_timer", None)
+        if timer is not None:
+            if busy:
+                previous = getattr(self, "_request_progress_dialog", None)
+                if previous is not None:
+                    previous.close()
+                    previous.deleteLater()
+                self._request_timings = {}
+                self._request_started_at = time.perf_counter()
+                self._request_stage = "Sending data to Qwen..."
+                dialog = QProgressDialog(self)
+                dialog.setWindowTitle("Processing article with Qwen")
+                dialog.setRange(0, 0)
+                dialog.setCancelButton(None)
+                dialog.setWindowModality(Qt.WindowModal)
+                dialog.setMinimumDuration(0)
+                dialog.setMinimumWidth(480)
+                dialog.setAutoClose(False)
+                dialog.setAutoReset(False)
+                self._request_progress_dialog = dialog
+                dialog.show()
+                self.request_elapsed_label.show()
+                self._update_request_elapsed()
+                timer.start()
+            elif self._request_started_at is not None:
+                timer.stop()
+                elapsed = time.perf_counter() - self._request_started_at
+                message = f"Qwen/OpenRouter request finished after {elapsed:.2f} seconds."
+                self.request_elapsed_label.setText(message)
+                self._log(message)
+                self._request_started_at = None
+                dialog = getattr(self, "_request_progress_dialog", None)
+                if dialog is not None:
+                    dialog.setWindowTitle("Qwen request timing breakdown")
+                    dialog.setLabelText(self._request_breakdown_html(elapsed, finished=True))
+                    dialog.setRange(0, 1)
+                    dialog.setValue(1)
+                    dialog.setCancelButtonText("Close")
         for name in ("finish_article_btn", "classify_btn"):
             button = getattr(self, name, None)
             if button is not None:
                 button.setEnabled(not busy)
         QApplication.setOverrideCursor(Qt.WaitCursor if busy else Qt.ArrowCursor)
 
+    @Slot(str)
+    def _on_request_progress(self, message: str) -> None:
+        self._log(message)
+        self._request_stage = message
+        match = re.fullmatch(r"Qwen (.+): ([0-9.]+) seconds\.", message)
+        if match and hasattr(self, "_request_timings"):
+            self._request_timings[match.group(1)] = float(match.group(2))
+        self._update_request_elapsed()
+
+    def _request_breakdown_html(self, elapsed: float, *, finished: bool = False) -> str:
+        timings = self._request_timings
+        total = timings.get("request round trip", 0)
+        rows = []
+        for key, label in (
+            ("Model loading", "Loading the model"),
+            ("Prompt processing", "Processing the prompt"),
+            ("Response generation", "Generating the response"),
+            ("transport/client overhead (approximate)", "Transport/client overhead (approx.)"),
+        ):
+            duration = timings.get(key)
+            value = f"{duration:.2f} s" if duration is not None else ("Unavailable" if finished else "Pending")
+            share = f"{duration / total:.1%}" if duration is not None and total > 0 else "—"
+            rows.append(f"<tr><td>{label}</td><td>{value}</td><td>{share}</td></tr>")
+        status = "Request ended" if finished else escape(self._request_stage)
+        return (
+            f"<b>{status}</b><p>Elapsed: {elapsed:.1f} seconds</p>"
+            '<table cellspacing="10"><tr><th align="left">Stage</th><th>Time</th><th>Share</th></tr>'
+            + "".join(rows) + "</table><p>Server timings are available after Qwen responds.<br>"
+            "Shares use the Qwen round-trip time; rounding may affect totals.</p>"
+        )
+
+    def _update_request_elapsed(self) -> None:
+        if self._request_started_at is None:
+            return
+        elapsed = time.perf_counter() - self._request_started_at
+        dialog = getattr(self, "_request_progress_dialog", None)
+        if dialog is not None:
+            dialog.setLabelText(self._request_breakdown_html(elapsed))
+        self.request_elapsed_label.setText(
+            f"Waiting for Qwen/OpenRouter — {elapsed:.1f} seconds elapsed"
+        )
+
+    def _run_article_finish_step(self, label: str, action):
+        """Show a processing step and retain its duration in the log."""
+        started = time.perf_counter()
+        self._log(f"{label}...")
+        indicator = getattr(self, "request_elapsed_label", None)
+        if indicator is not None:
+            indicator.setText(f"{label}...")
+            indicator.show()
+            indicator.repaint()
+        try:
+            result = action()
+        except Exception:
+            message = f"{label}: failed after {time.perf_counter() - started:.2f} seconds."
+            self._log(message)
+            if indicator is not None:
+                indicator.setText(message)
+            raise
+        outcome = "not completed" if result is False else "completed"
+        message = f"{label}: {outcome} in {time.perf_counter() - started:.2f} seconds."
+        self._log(message)
+        if indicator is not None:
+            indicator.setText(message)
+        return result
+
     def _on_article_finish_complete(
-        self, segment: dict[str, object], key: str | None, result, error
+        self, segment: dict[str, object], key: str | None, response, error
     ) -> None:
         self._set_article_finish_busy(False)
-        response, output_path = result
         if error is not None:
             self._log(f"Qwen/OpenRouter failed; keeping heuristic author links: {error}")
             response = {}
         else:
-            self._log("Author/affiliation model response received; validating and exporting XML.")
+            self._log("Author/affiliation model response received; preparing the XML draft.")
         real_client = self.openrouter_client
         self.openrouter_client = _ImmediateLLMClient(response)
         try:
-            generated_path, validation_errors = self._export_article_xml(
-                segment, output_path=output_path
+            def prepare_document():
+                self._update_document_model()
+                export_document = self._document_with_html_preview_continuations()
+                return self._document_for_segment(segment, export_document)
+
+            segment_document = self._run_article_finish_step(
+                "Preparing article metadata", prepare_document
             )
+            segment_key = self._segment_key(segment)
+            if segment_key in getattr(self, "_manual_link_review_segments", set()):
+                reviewed = self._llm_links_by_segment.get(segment_key)
+                if reviewed is not None:
+                    segment_document.authors = reviewed.authors
+                    segment_document.affiliations = reviewed.affiliations
+                    segment_document.corresponding_author = reviewed.corresponding_author
+                    segment_document.metadata["link_issues"] = []
+                    segment_document.metadata["author_link_source"] = "manual_review"
+            self._run_article_finish_step(
+                "Applying author and affiliation links",
+                lambda: self._link_authors_with_llm(segment, segment_document),
+            )
+            xml_text = self._run_article_finish_step(
+                "Generating XML draft", lambda: self.generator.to_string(segment_document)
+            )
+            index_value = segment.get("index")
+            try:
+                index = int(index_value) if index_value is not None else 0
+            except (TypeError, ValueError):
+                index = 0
+            label_path = self.config.generated_xml_dir / self._article_filename(
+                segment_document, index, 1, always_number=index > 0
+            )
+            source_value = self.document.metadata.get("source_pdf") if self.document else None
+            source_pdf = Path(str(source_value)) if source_value else None
+            correction = getattr(self, "_xml_correction_window", None)
+            if correction is not None:
+                correction._incoming_draft_key = self._article_draft_keys.get(key)
+            if not self._run_article_finish_step(
+                "Opening XML Correction",
+                lambda: self._show_xml_correction_text(xml_text, label_path, source_pdf),
+            ):
+                return
         except Exception as exc:
-            self._log(f"Article export failed: {exc}")
-            QMessageBox.critical(self, "Export failed", f"The article XML could not be written: {exc}")
+            self._log(f"Article XML draft preparation failed: {exc}")
+            QMessageBox.critical(self, "Article correction failed", f"The XML draft could not be prepared: {exc}")
             return
         finally:
             self.openrouter_client = real_client
-        if validation_errors:
-            messages = "\n".join(f"• {error.message}" for error in validation_errors)
-            self._log(
-                f"Cannot finish article {segment.get('abstract_number', '')}: "
-                f"{'; '.join(error.message for error in validation_errors)}"
-            )
-            QMessageBox.warning(
-                self,
-                "Article needs review",
-                "The article was not exported or locked because it is incomplete:\n\n" + messages,
-            )
-            return
-        if generated_path is None:
-            return
-        self._show_generated_xml([generated_path])
-        locked_count = self._lock_segment_blocks(segment, key)
+        correction = getattr(self, "_xml_correction_window", None)
+        if correction is not None and key is not None:
+            self._article_draft_keys[key] = correction._draft_key
+        locked_count = self._run_article_finish_step(
+            "Locking finished article blocks", lambda: self._lock_segment_blocks(segment, key)
+        )
         # Do not silently make a detected/remaining range the next working
         # article.  A fresh article begins only when the operator enters its
         # abstract number and explicitly starts it.
         self._current_segment_key = None
-        self._refresh_after_article_change()
+        self._run_article_finish_step("Refreshing article view", self._refresh_after_article_change)
         self._notify(
-            f"Finished article {segment.get('abstract_number', '')}: exported "
-            f"{generated_path.name}; locked {locked_count} block(s)."
+            f"Finished article {segment.get('abstract_number', '')}; opened its XML draft "
+            f"in XML Correction and locked {locked_count} block(s). Validate and export there."
         )
 
     def _export_article_xml(
@@ -2158,10 +2431,10 @@ class MainWindow(QMainWindow):
                     self._notify("The selection could not be turned into an article.")
                     return
                 try:
-                    generated_path, validation_errors = self._export_article_with_save_dialog(segment)
+                    generated_path, validation_errors = self._prepare_article_xml_draft(segment)
                 except Exception as exc:
                     self._rollback_article_change(snapshot)
-                    self._notify(f"The article XML could not be written: {exc}")
+                    self._notify(f"The article XML draft could not be prepared: {exc}")
                     return
                 if validation_errors:
                     # A refused finish must not leave extra article splits behind.
@@ -2194,15 +2467,16 @@ class MainWindow(QMainWindow):
                 if following is not None and viewer is not None:
                     viewer.render_page(max(0, int(following.get("start_page", 1)) - 1))
                 number = str(segment.get("abstract_number", "")).strip() or "ABSN"
-                exported_name = generated_path.name if generated_path is not None else ""
+                draft_name = generated_path.name if generated_path is not None else "article.xml"
                 where = (
                     f"next article starts on page {following.get('start_page')}."
                     if following is not None
                     else "the selection was the last article in the document."
                 )
                 self._notify(
-                    f"Finished article {number}: exported {exported_name}; locked "
-                    f"{locked_count} block(s); {where}"
+                    f"Finished article {number}: opened the in-memory draft {draft_name} "
+                    f"in XML Correction; locked {locked_count} block(s); {where} "
+                    "Validate and export there."
                 )
                 return
             else:
@@ -2220,10 +2494,10 @@ class MainWindow(QMainWindow):
             self._notify("The selection could not be turned into an article.")
             return
         try:
-            generated_path, validation_errors = self._export_article_with_save_dialog(segment)
+            generated_path, validation_errors = self._prepare_article_xml_draft(segment)
         except Exception as exc:
             self._rollback_article_change(snapshot)
-            self._notify(f"The article XML could not be written: {exc}")
+            self._notify(f"The article XML draft could not be prepared: {exc}")
             return
         if validation_errors:
             # A refused finish must not leave extra article splits behind.
@@ -2256,15 +2530,16 @@ class MainWindow(QMainWindow):
         if following is not None and viewer is not None:
             viewer.render_page(max(0, int(following.get("start_page", 1)) - 1))
         number = str(segment.get("abstract_number", "")).strip() or "ABSN"
-        exported_name = generated_path.name if generated_path is not None else ""
+        draft_name = generated_path.name if generated_path is not None else "article.xml"
         where = (
             f"next article starts on page {following.get('start_page')}."
             if following is not None
             else "the selection was the last article in the document."
         )
         self._notify(
-            f"Finished article {number}: exported {exported_name}; locked "
-            f"{locked_count} block(s); {where}"
+            f"Finished article {number}: opened the in-memory draft {draft_name} "
+            f"in XML Correction; locked {locked_count} block(s); {where} "
+            "Validate and export there."
         )
 
     def reopen_current_article(self) -> None:
@@ -2281,8 +2556,25 @@ class MainWindow(QMainWindow):
         if not candidates:
             self._notify("No finished article is available to reopen.")
             return
-        segment, key = candidates[-1]
+        selected = self._segment_at_tab(self.articles_tabs.currentIndex())
+        if selected is None:
+            self._notify("Select the article whose PDF selection you want to edit.")
+            return
+        key = self._segment_key(selected)
+        if key not in self._finished_segment_keys:
+            self._notify("The selected article's PDF blocks are already editable.")
+            return
+        segment = selected
         self._reopen_segment(segment, key)
+
+    def review_article_draft(self, segment) -> bool:
+        draft_key = self._article_draft_keys.get(self._segment_key(segment))
+        if not draft_key or not self._xml_correction_window.activate_draft(draft_key):
+            return False
+        self.pages.setCurrentWidget(self._xml_correction_window)
+        self.convert_step_btn.setChecked(False)
+        self.correct_step_btn.setChecked(True)
+        return True
 
     def reopen_article(self, segment: dict[str, object] | None = None) -> bool:
         """Unlock one named article again, from its own tab or menu.
@@ -2308,8 +2600,7 @@ class MainWindow(QMainWindow):
         """Unlock a finished article's blocks and refresh the views."""
 
         unlocked_count = self._unlock_segment_blocks(segment, key)
-        if self._current_segment_key == key:
-            self._current_segment_key = None
+        self._current_segment_key = key
         self._refresh_after_article_change()
         self._notify(
             f"Reopened article {segment.get('abstract_number', '')}; "
@@ -2553,7 +2844,7 @@ class MainWindow(QMainWindow):
 
         if self.document is None:
             self.finish_article_btn.setEnabled(False)
-            self.finish_article_btn.setText("Finish Article")
+            self.finish_article_btn.setText("Review XML")
             self.reopen_article_btn.setEnabled(False)
             self._refresh_delete_article_button(None)
             self.metadata_panel.set_abstract_number("", enabled=False, hint=None)
@@ -2567,7 +2858,7 @@ class MainWindow(QMainWindow):
         current = self._current_segment()
         if current is None:
             self.finish_article_btn.setEnabled(False)
-            self.finish_article_btn.setText("Finish Article")
+            self.finish_article_btn.setText("Review XML")
             self.metadata_panel.set_abstract_number(
                 self.document.abstract_number(),
                 enabled=True,
@@ -2579,7 +2870,7 @@ class MainWindow(QMainWindow):
             # export nothing; restoring is the way out.
             self.finish_article_btn.setEnabled(_key not in self._deleted_segment_keys)
             abstract_number = str(segment.get("abstract_number", "")).strip()
-            self.finish_article_btn.setText(f"Finish {abstract_number}" if abstract_number else "Finish Article")
+            self.finish_article_btn.setText(f"Review {abstract_number}" if abstract_number else "Review XML")
             self.metadata_panel.set_abstract_number(abstract_number)
         self.reopen_article_btn.setEnabled(bool(self._finished_segment_keys))
         self._refresh_delete_article_button(current)
@@ -2794,7 +3085,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _merge_author_affiliation_results(primary: LinkedAuthors, fallback: LinkedAuthors) -> LinkedAuthors:
-        """Fill gaps in the model parse from layout parsing without discarding either."""
+        """Fill model gaps, rejecting combined names supported as separate people."""
 
         def key(value: str) -> str:
             return re.sub(r"[^\w]", "", value.casefold())
@@ -2835,7 +3126,23 @@ class MainWindow(QMainWindow):
                 if marker:
                     by_marker.setdefault(marker, added)
 
-        authors = list(primary.authors)
+        def combines_source_authors(author) -> bool:
+            # Require separate, unambiguous source authors for every comma-delimited
+            # given name. A comma alone is not evidence that a name is invalid.
+            parts = [key(part) for part in author.given_names.split(",")]
+            if len(parts) < 2 or not all(parts) or len(set(parts)) != len(parts):
+                return False
+            if any(key(item.display_name) == key(author.display_name) for item in fallback.authors):
+                return False
+            matches = [
+                [item for item in fallback.authors if key(item.given_names) == part]
+                for part in parts
+            ]
+            return all(len(items) == 1 for items in matches) and any(
+                key(items[0].surname) == key(author.surname) for items in matches
+            )
+
+        authors = [author for author in primary.authors if not combines_source_authors(author)]
         author_by_key = {key(author.display_name): author for author in authors if key(author.display_name)}
         for candidate in fallback.authors:
             normalized = key(candidate.display_name)
@@ -2855,7 +3162,11 @@ class MainWindow(QMainWindow):
             mapped_ids = [id_map.get(value, value) for value in candidate.affiliation_ids]
             if existing is None:
                 added = replace(candidate, affiliation_ids=list(mapped_ids), markers=list(candidate.markers))
-                added.id = f"author_{len(authors) + 1}"
+                next_id = len(authors) + 1
+                used_ids = {author.id for author in authors}
+                while f"author_{next_id}" in used_ids:
+                    next_id += 1
+                added.id = f"author_{next_id}"
                 authors.append(added)
                 author_by_key[normalized] = added
             else:
@@ -2873,10 +3184,19 @@ class MainWindow(QMainWindow):
                     if additions:
                         existing.degrees = ", ".join(filter(None, (existing.degrees, *additions)))
 
+        corresponding = next(
+            (author for author in authors if author is primary.corresponding_author), None
+        )
+        if corresponding is None and fallback.corresponding_author is not None:
+            corresponding = next(
+                (author for author in authors
+                 if key(author.display_name) == key(fallback.corresponding_author.display_name)),
+                None,
+            )
         return LinkedAuthors(
             authors=authors,
             affiliations=affiliations,
-            corresponding_author=primary.corresponding_author or fallback.corresponding_author,
+            corresponding_author=corresponding,
             issues=list(primary.issues) + list(fallback.issues),
         )
 
@@ -2930,6 +3250,10 @@ class MainWindow(QMainWindow):
             if finished or segment.get("deleted"):
                 summary.setStyleSheet("color: #9a9a9a;")
             page_layout.addWidget(summary)
+            if key in getattr(self, "_article_draft_keys", {}):
+                review_button = QPushButton("Edit article XML")
+                review_button.clicked.connect(lambda checked=False, s=dict(segment): self.review_article_draft(s))
+                page_layout.addWidget(review_button)
             is_current = key is not None and key == self._current_segment_key
             current_marker = " (current)" if is_current else ""
             selected_count = sum(
@@ -3025,10 +3349,10 @@ class MainWindow(QMainWindow):
 
         number = str(segment.get("abstract_number", "")).strip() or "ABSN"
         if deleted or segment.get("deleted"):
-            return f"✕ {number}"
+            return f"? {number}"
         if finished:
-            return f"🔒 {number}"
-        return f"● {number}" if current else number
+            return f"?? {number}"
+        return f"? {number}" if current else number
 
     def _refresh_startup_ui(self) -> None:
         """Point the UI at the first required action before any article exists."""
@@ -3063,6 +3387,10 @@ class MainWindow(QMainWindow):
             if self._current_segment_key != key:
                 self._current_segment_key = key
                 self._refresh_article_buttons()
+        else:
+            self.finish_article_btn.setEnabled(key in getattr(self, "_article_draft_keys", {}))
+            self.finish_article_btn.setText("Review XML")
+        self.reopen_article_btn.setEnabled(key in self._finished_segment_keys)
         start_page = int(segment.get("start_page", 1))
         self.viewer.render_page(start_page - 1)
         # The Selected Blocks panel follows the working article, so switching
@@ -3702,14 +4030,23 @@ class MainWindow(QMainWindow):
             if block.id not in excluded_ids and not self._looks_like_footer_noise(block)
         ]
         self.document.title = self._compose_title(blocks)
+        title_blocks = self._title_source_blocks(blocks)
+        self.document.metadata["title_script_runs"] = self._script_runs_for_blocks(
+            self._raw_script_sources(title_blocks, self.document.raw_blocks), self.document.title
+        )
         abstract_blocks = [b for b in blocks if b.role == "abstract"]
         abstract_blocks.sort(key=reading_order_key)
-        abstract_text = "\n".join(
+        abstract_text = "\r\n".join(
             self._sanitize_xml_text(b.text)
             for b in abstract_blocks
             if not is_abstract_heading(b.text)
         )
         self.document.abstract = abstract_text
+        self.document.metadata["abstract_script_runs"] = self._script_runs_for_blocks(
+            self._raw_script_sources(
+                [b for b in abstract_blocks if not is_abstract_heading(b.text)], self.document.raw_blocks
+            ), abstract_text
+        )
         self.document.metadata["keywords"] = self._keywords_from_blocks(blocks)
         author_blocks = [b for b in blocks if b.role in {"author", "corresponding_author", "author_affiliation"}]
         author_blocks.sort(key=reading_order_key)
@@ -3796,7 +4133,7 @@ class MainWindow(QMainWindow):
             if belongs_to_segment(block)
         ]
         # Paragraph lines always name raw blocks, so resolve them for text
-        # trimming through raw extraction blocks — each line is checked
+        # trimming through raw extraction blocks ? each line is checked
         # individually against the segment bounds and a wrong continuation
         # across an article boundary gets cut at the right place.
         raw_by_id = {block.id: block for block in (source.raw_blocks or source.blocks)}
@@ -3827,10 +4164,14 @@ class MainWindow(QMainWindow):
                 for block in kept_blocks
                 if (display_by_source_id.get(str(block.id), block).role or "") != "unclassified"
             ]
+            paragraph_text, paragraph_runs = join_text_and_runs(
+                [(block.text, block.inline_runs) for block in kept_blocks], " "
+            )
             paragraphs.append(
                 replace(
                     paragraph,
-                    text=" ".join(" ".join(block.text.split()) for block in kept_blocks),
+                    text=paragraph_text,
+                    inline_runs=paragraph_runs,
                     source_line_ids=[block.id for block in kept_blocks],
                     role=max(set(roles), key=roles.count) if roles else "unclassified",
                 )
@@ -3854,6 +4195,17 @@ class MainWindow(QMainWindow):
             count=1,
             flags=re.IGNORECASE,
         ).strip()
+        metadata["title_script_runs"] = self._script_runs_for_blocks(
+            self._raw_script_sources(self._title_source_blocks(blocks), source.raw_blocks), title
+        )
+        abstract_blocks = sorted(
+            (block for block in blocks if block.role == "abstract" and block.text.strip() and not is_abstract_heading(block.text)),
+            key=reading_order_key,
+        )
+        abstract_text = "\r\n".join(self._sanitize_xml_text(block.text) for block in abstract_blocks)
+        metadata["abstract_script_runs"] = self._script_runs_for_blocks(
+            self._raw_script_sources(abstract_blocks, source.raw_blocks), abstract_text
+        )
         author_blocks = sorted(
             (block for block in blocks if block.role in {"author", "corresponding_author", "author_affiliation"}),
             key=reading_order_key,
@@ -3869,11 +4221,7 @@ class MainWindow(QMainWindow):
             authors=linked.authors,
             corresponding_author=linked.corresponding_author,
             affiliations=linked.affiliations,
-            abstract="\n".join(
-                self._sanitize_xml_text(block.text)
-                for block in blocks
-                if block.role == "abstract" and block.text.strip() and not is_abstract_heading(block.text)
-            ),
+            abstract=abstract_text,
             raw_blocks=raw_blocks,
             blocks=blocks,
             paragraphs=paragraphs,
@@ -4007,7 +4355,7 @@ class MainWindow(QMainWindow):
         if re.fullmatch(r"[\s|.\-]*\d+[\s|.\-]*", text):
             return True
         footer_terms = (
-            "©",
+            "?",
             "copyright",
             "published by",
             "john wiley",
@@ -4100,6 +4448,127 @@ class MainWindow(QMainWindow):
         # as "(S100)". Keep it in extraction metadata, not in the article title.
         title = re.sub(r"^\s*\([A-Z][A-Z0-9./-]{1,30}\)\s+", "", title, count=1, flags=re.IGNORECASE).strip()
         return self._strip_abstract_number_from_title(title)
+
+    def _title_source_blocks(self, blocks):
+        """Return the same title lines selected by _compose_title."""
+        title_blocks = sorted((block for block in blocks if block.role == "title"), key=reading_order_key)
+        if not title_blocks:
+            return []
+        page1 = [block for block in title_blocks if block.page == 1]
+        candidates = page1 if page1 else title_blocks
+        grouped = [candidates[0]]
+        for block in candidates[1:]:
+            previous = grouped[-1]
+            if block.page != previous.page or block.y < previous.y:
+                break
+            if block.y - (previous.y + previous.height) > max(previous.height, block.height) * 1.6:
+                break
+            grouped.append(block)
+        return grouped
+
+    @staticmethod
+    def _raw_script_sources(display_blocks, raw_blocks):
+        """Expand merged role blocks to their original extracted text lines."""
+        raw_by_id = {block.id: block for block in raw_blocks}
+        sources = []
+        seen = set()
+        for display in display_blocks:
+            source_ids = (display.metadata or {}).get("merged_block_ids") or [display.id]
+            found = False
+            for source_id in source_ids:
+                source = raw_by_id.get(str(source_id))
+                if source is not None:
+                    found = True
+                    if source.id not in seen:
+                        sources.append(source)
+                        seen.add(source.id)
+            if not found and display.id not in seen:
+                sources.append(display)
+                seen.add(display.id)
+        return sorted(sources, key=reading_order_key)
+
+    def _script_runs_for_blocks(self, blocks, target_text: str) -> list[dict[str, object]]:
+        """Project extraction-time runs onto normalized title/abstract text."""
+        target, _ = normalize_inline_runs(self._sanitize_xml_text(target_text), [])
+        if not target:
+            return []
+        detector = InlineScriptDetector()
+        runs: list[dict[str, object]] = []
+        search_from = 0
+        for block in sorted(blocks, key=reading_order_key):
+            block_text, block_runs = normalize_inline_runs(
+                self._sanitize_xml_text(block.text),
+                block.inline_runs or detector.detect(
+                    self._sanitize_xml_text(block.text),
+                    (block.metadata or {}).get("text_spans", []),
+                ),
+            )
+            if not block_text:
+                continue
+            prefix_offset = 0
+            matched_text = block_text
+            line_start = target.find(matched_text, search_from)
+            if line_start < 0:
+                stripped = self._strip_abstract_number_from_title(block_text)
+                stripped = re.sub(
+                    r"^\s*\([A-Z][A-Z0-9./-]{1,30}\)\s+",
+                    "",
+                    stripped,
+                    count=1,
+                    flags=re.IGNORECASE,
+                ).strip()
+                stripped = re.sub(
+                    r"^\s*([A-Z]{1,4}\d+(?:\.\d+)?)\s+",
+                    "",
+                    stripped,
+                    count=1,
+                    flags=re.IGNORECASE,
+                ).strip()
+                if stripped and stripped != block_text:
+                    line_start = target.find(stripped, search_from)
+                    if line_start >= 0:
+                        prefix_offset = block_text.find(stripped)
+                        matched_text = stripped
+            if line_start < 0:
+                continue
+
+            for run in block_runs:
+                try:
+                    local_start = int(run["start"])
+                    local_end = int(run["end"])
+                    kind = str(run["type"])
+                    expected = str(run.get("text", block_text[local_start:local_end]))
+                except (KeyError, TypeError, ValueError, IndexError):
+                    continue
+                if kind not in {"sup", "sub"} or local_start < prefix_offset:
+                    continue
+                local_start -= prefix_offset
+                local_end -= prefix_offset
+                start = line_start + local_start
+                end = line_start + local_end
+                if (
+                    0 <= start < end <= len(target)
+                    and block_text[local_start + prefix_offset:local_end + prefix_offset] == expected
+                    and target[start:end] == expected
+                ):
+                    runs.append(
+                        {
+                            "start": start,
+                            "end": end,
+                            "type": kind,
+                            "text": expected,
+                            "source": str(run.get("source", "geometry")),
+                        }
+                    )
+            search_from = line_start + len(matched_text)
+
+        ordered = sorted(runs, key=lambda run: (int(run["start"]), int(run["end"])))
+        accepted: list[dict[str, object]] = []
+        for run in ordered:
+            if accepted and int(run["start"]) < int(accepted[-1]["end"]):
+                continue
+            accepted.append(run)
+        return accepted
 
     def _current_article_block_ids(self) -> frozenset[str] | None:
         """Blocks of the article being worked on, or None when none is current.
@@ -4260,6 +4729,13 @@ class MainWindow(QMainWindow):
         if self._uses_explicit_article_flow():
             return self._article_owning(title_id)
         existing = self._article_for_title(title_id)
+        if existing is None:
+            title = next((block for block in self.document.blocks if block.id == title_id), None)
+            if title is not None and title.metadata.get("merged_regions"):
+                existing = self._article_owning(title_id)
+                if existing is not None:
+                    existing["title_block_id"] = title_id
+                    self._invalidate_segment_identity()
         if existing is not None:
             self._sync_membership_segment(existing)
             self._current_segment_key = title_id
@@ -4460,7 +4936,9 @@ class MainWindow(QMainWindow):
             viewer = getattr(self, "viewer", None)
             if viewer is not None:
                 viewer.set_selected_blocks(
-                    self._selected_block_ids, next(iter(self._selected_block_ids), None)
+                    self._selected_block_ids,
+                    next(iter(self._selected_block_ids), None),
+                    navigate_to_primary=False,
                 )
         self.tree.blockSignals(True)
         self.tree.clear_dynamic_items()
@@ -4547,7 +5025,7 @@ class MainWindow(QMainWindow):
 
     def _make_block_item(self, block) -> object:
         locked = self._article_locked(block)
-        prefix = "🔒 " if locked else ""
+        prefix = "?? " if locked else ""
         item = self._tree_item(block.id, f"{prefix}{block.text[:60]}", block)
         self._attach_merge_details(item, block)
         return item
@@ -4626,7 +5104,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Article finished",
-                "This block belongs to a finished article and is locked. Use Reopen Article to unlock it first.",
+                "This block belongs to a finished article and is locked. Use Edit PDF Selection to unlock it first.",
             )
             return
         valid_roles = {
@@ -4657,6 +5135,8 @@ class MainWindow(QMainWindow):
                     self.document.metadata["manual_title_block_id"] = str(block_id)
             previous_role = block.role
             block.role = new_role
+            block.metadata["role_source"] = "manual"
+            block.confidence = 1.0
             self._sync_block_abstract_number_role(block, previous_role)
             if previous_role == "title" and new_role != "title":
                 self._clear_manual_title_metadata_if_needed(str(block_id))
@@ -4720,7 +5200,9 @@ class MainWindow(QMainWindow):
         self._selected_zone_ids.clear()
         self.viewer.set_selected_zones(set())
         continuation_links = [(group[index], group[index + 1]) for index in range(len(group) - 1)]
-        self.viewer.set_selected_blocks(self._selected_block_ids, group[0])
+        self.viewer.set_selected_blocks(
+            self._selected_block_ids, group[0], navigate_to_primary=False
+        )
         self.viewer.set_continuation_links(continuation_links)
         self._sync_tree_selection()
         self._update_selection_status()
@@ -4958,10 +5440,12 @@ class MainWindow(QMainWindow):
         self._refresh_article_buttons()
         self._selected_block_ids = set(changed_ids)
         primary_id = changed_ids[0]
-        self.viewer.set_selected_blocks(self._selected_block_ids, primary_id)
+        self.viewer.set_selected_blocks(
+            self._selected_block_ids, primary_id, navigate_to_primary=False
+        )
         self._update_selection_status()
         self._update_selection_panel()
-        self._select_block_by_id(primary_id, preserve_selection=True)
+        self._select_block_by_id(primary_id, preserve_selection=True, navigate=False)
         self._log(
             "Classified selected items: " + ", ".join(f"{block_id}={role}" for block_id, role in changed)
         )
@@ -5095,7 +5579,8 @@ class MainWindow(QMainWindow):
 
     def _clear_abstract_number_role(self, block_id: str) -> None:
         """Undo the marker metadata after a person untags a block.
-        When the tagged marker is what started an article, untagging it also
+
+        When the tagged marker is what started an article, untagging it also
         folds that article back into the one before it: the tag and the article
         boundary live and die together.
         """
@@ -5155,18 +5640,22 @@ class MainWindow(QMainWindow):
     def _sync_block_abstract_number_role(self, block, previous_role: str) -> None:
         """Record marker metadata after a manual role change.
 
-        This hook only manages body-text exclusion. Article numbers and starts
-        are supplied explicitly through Article Metadata.
+        Marker-driven articles split and adopt the printed number. In the
+        explicit Article Metadata flow, tagging only records body-text exclusion.
         """
 
+        if self.document is None:
+            return
         if block.role == "abstract_number":
             # Cut first: the marker starts the new article, so the number that
             # _apply_abstract_number_role records must land on the article the
             # marker starts, not on the one that happens to contain the block
             # before the cut exists.
-            # Article boundaries in the explicit-number workflow are made
-            # only by “Start Article With This Number”.  Do not turn a marker
-            # role assigned during the current article into a second tab.
+            if not self._uses_explicit_article_flow():
+                self._maybe_split_article_at_marker(block)
+                self._apply_abstract_number_role(block)
+                return
+            # Explicit article starts and numbers remain controlled by Article Metadata.
             marker_ids = list(self.document.metadata.get("abstract_number_block_ids", []))
             if block.id not in marker_ids:
                 marker_ids.append(block.id)
@@ -5198,7 +5687,8 @@ class MainWindow(QMainWindow):
 
     def _maybe_split_article_at_marker(self, block) -> None:
         """Start a new article when a tagged marker prints a fresh number.
-        The user classifies the roles of an article, and the moment they tag a
+
+        The user classifies the roles of an article, and the moment they tag a
         fresh ``abstract_number`` the classification cuts the stream there: the
         article before the marker is complete, and everything from the marker
         on belongs to the next one. Tagging the same marker again (a corrected
@@ -5390,12 +5880,26 @@ class MainWindow(QMainWindow):
             selected_blocks = sorted(selected_blocks, key=reading_order_key)
         selected_ids = {block.id for block in selected_blocks}
         merged_block = self._merge_blocks(selected_blocks, merge_source=merge_source, join_with_space=join_with_space)
+        segments_before = deepcopy(self._document_segments())
+        current_before = self._current_segment_key
+        active_before = self._current_segment()
         remaining_blocks = [block for block in self.document.blocks if block.id not in selected_ids]
         remaining_blocks.append(merged_block)
         remaining_blocks = self._sort_reading_order(remaining_blocks)
         self.document.blocks = remaining_blocks
+        for segment in self._document_segments():
+            members = segment.get("block_ids")
+            if isinstance(members, list):
+                segment["block_ids"] = list(dict.fromkeys(
+                    merged_block.id if value in selected_ids else value for value in members
+                ))
+            for field in ("title_block_id", "abstract_number_block_id"):
+                if segment.get(field) in selected_ids:
+                    segment[field] = merged_block.id
         # Fusing blocks changes which block starts an article.
         self._invalidate_segment_identity()
+        if active_before is not None:
+            self._current_segment_key = self._segment_key(active_before[0])
         self._selected_block_ids = {merged_block.id}
         self._selected_zone_ids.clear()
         self._selected_zone_id = None
@@ -5403,19 +5907,27 @@ class MainWindow(QMainWindow):
             "merged_id": merged_block.id,
             "original_blocks": [replace(block) for block in selected_blocks],
             "merged_block": replace(merged_block),
+            "segments_before": segments_before,
+            "current_before": current_before,
+            "segments_after": deepcopy(self._document_segments()),
+            "current_after": self._current_segment_key,
         }
+        if any(action.get("type") == "block_geometry" for action in getattr(self, "_undo_stack", [])):
+            self._undo_stack.append({"type": "resize_merge", "merge": deepcopy(self._last_manual_merge)})
         self._redo_manual_merge = None
 
         self._update_document_model()
         self.viewer.set_blocks([asdict(block) for block in self.document.blocks])
         self.viewer.set_zones([asdict(zone) for zone in self.document.zones])
         self._populate_tree()
-        self.viewer.set_selected_blocks(self._selected_block_ids, merged_block.id)
+        self.viewer.set_selected_blocks(
+            self._selected_block_ids, merged_block.id, navigate_to_primary=False
+        )
         self._update_selection_status()
         self._update_selection_panel()
         self._update_html_preview()
         self._log(f"{action_label} {len(selected_blocks)} blocks into {merged_block.id}")
-        self._select_block_by_id(merged_block.id, preserve_selection=True)
+        self._select_block_by_id(merged_block.id, preserve_selection=True, navigate=False)
 
     def _selection_looks_like_paragraph_continuation(self, selected_blocks) -> tuple[bool, str]:
         """Validate that the current selection is safe to collapse as one paragraph.
@@ -5588,14 +6100,28 @@ class MainWindow(QMainWindow):
             return
 
         merged_id = str(self._last_manual_merge["merged_id"])
+        article_state = {key: deepcopy(self._last_manual_merge[key]) for key in
+                         ("segments_before", "current_before", "segments_after", "current_after")
+                         if key in self._last_manual_merge}
+        if self._undo_stack and self._undo_stack[-1].get("type") == "resize_merge":
+            if self._undo_stack[-1]["merge"]["merged_id"] == merged_id:
+                self._undo_stack.pop()
         original_blocks = list(self._last_manual_merge["original_blocks"])
-        merged_block = replace(self._last_manual_merge["merged_block"])
+        merged_block = deepcopy(next((block for block in self.document.blocks if block.id == merged_id),
+                                     self._last_manual_merge["merged_block"]))
+        if "segments_after" in article_state:
+            article_state["segments_after"] = deepcopy(self._document_segments())
+            article_state["current_after"] = self._current_segment_key
         self.document.blocks = [block for block in self.document.blocks if block.id != merged_id]
         self.document.blocks.extend(original_blocks)
         self.document.blocks.sort(key=reading_order_key)
+        if "segments_before" in article_state:
+            self.document.metadata["article_segments"] = deepcopy(article_state["segments_before"])
+            self._current_segment_key = article_state["current_before"]
         self._invalidate_segment_identity()
         self._selected_block_ids = {block.id for block in original_blocks}
         self._redo_manual_merge = {
+            **article_state,
             "merged_id": merged_id,
             "original_blocks": [replace(block) for block in original_blocks],
             "merged_block": merged_block,
@@ -5618,6 +6144,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No document", "Load a PDF first.")
             return
         self._active_zone_move_undo_id = None
+        self._active_block_move_undo_id = None
         if not self._undo_stack:
             if self._last_manual_merge:
                 self.undo_last_merge()
@@ -5627,6 +6154,28 @@ class MainWindow(QMainWindow):
 
         action = self._undo_stack.pop()
         action_type = str(action.get("type", ""))
+        if action_type == "resize_merge":
+            self._last_manual_merge = action["merge"]
+            self.undo_last_merge()
+            return
+        if action_type == "block_geometry":
+            if "split_ids" in action:
+                ids = set(action["split_ids"])
+                position = next((i for i, b in enumerate(self.document.blocks) if b.id in ids), len(self.document.blocks))
+                self.document.blocks = [b for b in self.document.blocks if b.id not in ids]
+                self.document.blocks.insert(position, action["original_block"])
+                self.document.metadata = action["document_metadata"]
+                self._selected_block_ids = {action["block_id"]}
+                self._refresh_resize_split(action["block_id"])
+                return
+            block = next((b for b in self.document.blocks if b.id == action["block_id"]), None)
+            if block is not None:
+                if "original_block" in action:
+                    block.metadata = deepcopy(action["original_block"].metadata)
+                    block.bbox = list(action["before"])
+                self._set_block_geometry(block, action["before"])
+                self._log(f"Undid text block adjustment {block.id}")
+            return
         if action_type == "article_segments":
             self._restore_article_snapshot(action)
             return
@@ -5823,25 +6372,36 @@ class MainWindow(QMainWindow):
             return
 
         original_blocks = list(self._redo_manual_merge["original_blocks"])
+        article_state = {key: deepcopy(self._redo_manual_merge[key]) for key in
+                         ("segments_before", "current_before", "segments_after", "current_after")
+                         if key in self._redo_manual_merge}
         merged_block = replace(self._redo_manual_merge["merged_block"])
         removed_ids = {block.id for block in original_blocks}
         self.document.blocks = [block for block in self.document.blocks if block.id not in removed_ids]
         self.document.blocks.append(merged_block)
         self.document.blocks.sort(key=reading_order_key)
+        if "segments_after" in article_state:
+            self.document.metadata["article_segments"] = deepcopy(article_state["segments_after"])
+            self._current_segment_key = article_state["current_after"]
         self._invalidate_segment_identity()
         self._selected_block_ids = {merged_block.id}
         self._last_manual_merge = {
             "merged_id": merged_block.id,
             "original_blocks": [replace(block) for block in original_blocks],
             "merged_block": replace(merged_block),
+            **article_state,
         }
+        if any(action.get("type") == "block_geometry" for action in getattr(self, "_undo_stack", [])):
+            self._undo_stack.append({"type": "resize_merge", "merge": deepcopy(self._last_manual_merge)})
         self._redo_manual_merge = None
 
         self._update_document_model()
         self.viewer.set_blocks([asdict(block) for block in self.document.blocks])
         self.viewer.set_zones([asdict(zone) for zone in self.document.zones])
         self._populate_tree()
-        self.viewer.set_selected_blocks(self._selected_block_ids, merged_block.id)
+        self.viewer.set_selected_blocks(
+            self._selected_block_ids, merged_block.id, navigate_to_primary=False
+        )
         self._update_selection_status()
         self._update_selection_panel()
         self._log(f"Reapplied merge into {merged_block.id}")
@@ -5849,7 +6409,7 @@ class MainWindow(QMainWindow):
     def _merge_blocks(self, blocks, merge_source: str = "manual", join_with_space: bool = False) -> object:
         first = blocks[0]
         text_parts = [block.text.strip() for block in blocks if block.text.strip()]
-        text = " ".join(text_parts) if join_with_space else "\n".join(text_parts)
+        text = " ".join(text_parts) if join_with_space else "\r\n".join(text_parts)
         bbox = [
             min(block.bbox[0] for block in blocks),
             min(block.bbox[1] for block in blocks),
@@ -5863,11 +6423,42 @@ class MainWindow(QMainWindow):
             source_line_ids.extend(str(value) for value in block.metadata.get("source_line_ids", [block.id]))
         metadata["source_line_ids"] = list(dict.fromkeys(source_line_ids))
         metadata["merge_count"] = len(blocks)
+        metadata["merged_regions"] = [
+            deepcopy(region)
+            for block in blocks
+            for region in (block.metadata.get("merged_regions") or [
+                {"page": block.page, "bbox": list(block.bbox)}
+            ])
+        ]
         metadata["merge_source"] = merge_source
         metadata["is_paragraph_unit"] = merge_source in {"manual", "paragraph_continuation"}
         if merge_source == "paragraph_continuation":
             metadata["continuation_from"] = [block.id for block in blocks[:-1]]
             metadata["continuation_to"] = blocks[-1].id
+        separator = " " if join_with_space else "\r\n"
+        text_parts: list[str] = []
+        inline_runs: list[dict[str, object]] = []
+        text_offset = 0
+        for block in blocks:
+            part = block.text.strip()
+            if not part:
+                continue
+            if text_parts:
+                text_offset += len(separator)
+            left_trim = len(block.text) - len(block.text.lstrip())
+            right_end = len(block.text.rstrip())
+            inline_runs.extend(
+                shift_trimmed_runs(
+                    block.text,
+                    block.inline_runs,
+                    left_trim,
+                    right_end,
+                    text_offset,
+                )
+            )
+            text_parts.append(part)
+            text_offset += len(part)
+        text = separator.join(text_parts)
         return replace(
             first,
             id=f"merged_{first.page:03d}_{len(self.document.blocks):03d}",
@@ -5877,22 +6468,36 @@ class MainWindow(QMainWindow):
             y=min(block.y for block in blocks),
             width=bbox[2] - bbox[0],
             height=bbox[3] - bbox[1],
+            inline_runs=inline_runs,
             confidence=0.0,
             role="unclassified",
             metadata=metadata,
         )
 
-    def _select_block_by_id(self, block_id: str, preserve_selection: bool = False) -> None:
+    def _select_block_by_id(
+        self,
+        block_id: str,
+        preserve_selection: bool = False,
+        navigate: bool = True,
+    ) -> None:
         if self.document is None:
             return
         block = next((b for b in self.document.blocks if b.id == block_id), None)
         if block is None:
             return
         if preserve_selection:
-            self.viewer.set_selected_blocks(self._selected_block_ids, block_id)
+            self.viewer.set_selected_blocks(
+                self._selected_block_ids,
+                block_id,
+                navigate_to_primary=navigate,
+            )
         else:
             self._selected_block_ids = {block_id}
-            self.viewer.set_selected_blocks(self._selected_block_ids, block_id)
+            self.viewer.set_selected_blocks(
+                self._selected_block_ids,
+                block_id,
+                navigate_to_primary=navigate,
+            )
             self._update_selection_status()
         # Standard inspector behavior: selecting a block anywhere (viewer,
         # tree, preview, review navigation) reveals its properties tab.
@@ -5916,10 +6521,9 @@ class MainWindow(QMainWindow):
             return
         if not additive:
             self._range_anchor_block_id = block_id
-        if not additive:
-            self._selected_zone_id = None
-            self._selected_zone_ids.clear()
-            self.viewer.set_selected_zones(set())
+        self._selected_zone_id = None
+        self._selected_zone_ids.clear()
+        self.viewer.set_selected_zones(set())
         if additive:
             if block_id in self._selected_block_ids:
                 self._selected_block_ids.remove(block_id)
@@ -5927,13 +6531,13 @@ class MainWindow(QMainWindow):
                 self._selected_block_ids.add(block_id)
         else:
             self._selected_block_ids = {block_id}
-        self.viewer.set_selected_blocks(self._selected_block_ids, block_id if block_id in self._selected_block_ids else None)
+        self.viewer.set_selected_blocks(self._selected_block_ids, block_id if block_id in self._selected_block_ids else None, navigate_to_primary=False)
         self.viewer.set_selected_zones(self._selected_zone_ids, self._selected_zone_id)
         self._sync_tree_selection()
         self._update_selection_status()
         self._update_selection_panel()
         if block_id in self._selected_block_ids:
-            self._select_block_by_id(block_id, preserve_selection=True)
+            self._select_block_by_id(block_id, preserve_selection=True, navigate=False)
         else:
             self.props.set_role(None)
         self._update_html_preview()
@@ -6048,7 +6652,7 @@ class MainWindow(QMainWindow):
             return
         self.selection_hint.setText(f"{len(selected_blocks)} block(s), {len(selected_zones)} zone(s) selected for merging.")
         for block in selected_blocks:
-            snippet = block.text.strip().replace("\n", " ")
+            snippet = block.text.strip().replace("\r\n", " ")
             label = f"{block.id} | p{block.page} | {block.role} | {snippet[:70]}"
             self.selection_list.addItem(QListWidgetItem(label))
         for zone in selected_zones:
@@ -6072,7 +6676,43 @@ class MainWindow(QMainWindow):
         self.props.set_role(None)
 
     def _load_pdf_path(self, path: str) -> None:
-        self.document = self.extractor.extract(path)
+        if self.document is not None and not self._xml_correction_window.confirm_close_drafts('opening another PDF'):
+            return
+        self._xml_correction_window._retain_draft()
+        self._document_generation += 1
+        generation = self._document_generation
+        thread = QThread(self)
+        worker = _PdfLoadWorker(
+            path, self.config.visible_text_only, self.config.visible_text_dark_threshold, generation
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_pdf_load_complete, Qt.QueuedConnection)
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda current=thread: self._forget_pdf_load_thread(current))
+        thread.finished.connect(thread.deleteLater)
+        self._pdf_load_thread = thread
+        self._pdf_load_worker = worker
+        self._log(f"Opening {path}...")
+        thread.start()
+
+    @Slot(int, object, object)
+    def _on_pdf_load_complete(self, generation: int, result, error) -> None:
+        if generation != self._document_generation:
+            return
+        if error is not None:
+            self._log(f"Could not load PDF: {error}")
+            QMessageBox.critical(self, "PDF Load Error", str(error))
+            return
+        (
+            self.document, refine_report, page_count, page_sizes, preview,
+            block_payload, zone_payload, report_json, timings,
+        ) = result
+        path = str(self.document.metadata.get("source_pdf", ""))
+        self.pdf_filename_label.setText(f"PDF: {Path(path).name}")
+        self.pdf_filename_label.setToolTip(path)
+        self.document.metadata["source_path"] = path
         self._startup_flow = True
         self._explicit_number_workflow = True
         # Old extractor versions may return marker-derived ranges; discard
@@ -6080,17 +6720,9 @@ class MainWindow(QMainWindow):
         self.document.metadata.pop("article_segments", None)
         self.document.metadata.pop(self.DETECTED_SEGMENTS_KEY, None)
         self._undo_stack.clear()
+        self._active_block_move_undo_id = None
         self._html_preview_merges.clear()
         self._active_zone_move_undo_id = None
-        results = self.classifier.classify_blocks(self.document.blocks)
-        for block, result in zip(self.document.blocks, results, strict=False):
-            block.role = result.role
-            block.confidence = result.confidence
-            block.metadata["role_source"] = "heuristic"
-        # Deterministic cleanup of predictable heuristic mistakes: this is the
-        # only thing the user reads. Auto-classified roles are already decided,
-        # so the refiner never invades text that did not need a decision.
-        refine_report = self.auto_refiner.refine(self.document.blocks)
         self._last_refine_report = refine_report
         if refine_report.changed_count:
             self._log(
@@ -6099,6 +6731,7 @@ class MainWindow(QMainWindow):
             )
         self._review_block_ids = list(refine_report.review_ids)
         self._review_index = -1
+        self._article_draft_keys = {}
         self._finished_segment_keys = []
         self._deleted_segment_keys = []
         self._current_segment_key = None
@@ -6107,30 +6740,55 @@ class MainWindow(QMainWindow):
         self._manual_document_author_links = {}
         self._invalidate_segment_identity()
         self.viewer.set_deleted_block_ids(set())
-        # Keep the article number at its explicit default until the user enters it.
-        self._update_document_model()
-        self.viewer.load_pdf(path)
-        self.viewer.set_blocks([asdict(block) for block in self.document.blocks])
+        self.viewer.load_pdf(path, preview=preview, page_count=page_count, page_sizes=page_sizes)
+        self.document_stack.setCurrentWidget(self.viewer)
+        self.edit_toolbar.show()
+        self.viewer.set_document_overlays(block_payload, zone_payload)
         self._selected_block_ids.clear()
         self._selected_zone_ids.clear()
         self._selected_zone_id = None
         self._update_selection_status()
         self._update_selection_panel()
-        self._populate_tree()
-        self._sync_auto_zones()
-        self.viewer.set_zones([asdict(zone) for zone in self.document.zones])
-        self._update_html_preview()
-        report_path = self.config.output_dir / "pipeline_report.json"
-        report_path.write_text(json.dumps(self.document.to_pipeline_report(), indent=2, ensure_ascii=False), encoding="utf-8")
         self._log(f"Loaded {path}")
         self._log(f"Detected {len(self.document.blocks)} text blocks")
         detected_count = len(self._detected_segments())
         if detected_count:
             self._log("Ignored extracted article-number markers; enter each number manually.")
-        self._log(f"Pipeline report written to {report_path}")
+        for stage, duration in timings.items():
+            self._log(f"  {stage}: {duration:.2f} seconds")
+        self._last_pipeline_report_json = report_json
         self.metadata_panel.set_merge_details(None)
         self.props.set_role(None)
+        QTimer.singleShot(100, self._finish_pdf_load_ui)
+
+    @Slot()
+    def _finish_pdf_load_ui(self) -> None:
+        if self.document is None or not self.viewer.is_document_current(
+            str(self.document.metadata.get("source_pdf", ""))
+        ):
+            return
+        self._populate_tree()
+        QTimer.singleShot(0, self._finish_pdf_load_metadata)
+
+    @Slot()
+    def _finish_pdf_load_metadata(self) -> None:
+        if self.document is None or not self.viewer.is_document_current(
+            str(self.document.metadata.get("source_pdf", ""))
+        ):
+            return
+        self._update_document_model()
+        self._sync_auto_zones()
+        self.viewer.set_zones([asdict(zone) for zone in self.document.zones])
+        self._update_html_preview()
         self._refresh_article_buttons()
+        # Keep the converter visible after extraction. Finishing an article
+        # prepares its XML draft in memory and opens the correction workspace.
+
+    @Slot()
+    def _forget_pdf_load_thread(self, thread: QThread) -> None:
+        if self._pdf_load_thread is thread:
+            self._pdf_load_thread = None
+            self._pdf_load_worker = None
 
     def _update_merged_details(self, block) -> None:
         """Show merge metadata for merged blocks and clear it otherwise."""
@@ -6178,6 +6836,132 @@ class MainWindow(QMainWindow):
         self._update_selection_status()
         self._update_selection_panel()
         self._log(f"Selected {len(self._selected_zone_ids)} zone(s)")
+
+    def _set_block_geometry(self, block, bbox: list[float]) -> None:
+        """Change reviewed geometry without replacing text, roles, or raw extraction."""
+        dx, dy = bbox[0] - block.bbox[0], bbox[1] - block.bbox[1]
+        if dx or dy:
+            for region in block.metadata.get("merged_regions", []):
+                x0, y0, x1, y1 = region["bbox"]
+                region["bbox"] = [x0 + dx, y0 + dy, x1 + dx, y1 + dy]
+        block.bbox = list(bbox)
+        block.x, block.y = bbox[:2]
+        block.width = bbox[2] - bbox[0]
+        block.height = bbox[3] - bbox[1]
+        self.viewer.set_blocks([asdict(entry) for entry in self.document.blocks])
+
+    def _on_viewer_block_piece_moved(self, block_id: str, index: int, bbox: list[float]) -> None:
+        if self.document is None:
+            return
+        block = next((b for b in self.document.blocks if b.id == block_id), None)
+        if block is None or self._article_locked(block):
+            return
+        regions = block.metadata.get("merged_regions", [])
+        if not 0 <= index < len(regions) or len(bbox) != 4:
+            return
+        bbox = [float(value) for value in bbox]
+        if not all(math.isfinite(value) for value in bbox):
+            return
+        if bbox[2] - bbox[0] < 5 or bbox[3] - bbox[1] < 5 or bbox == regions[index]["bbox"]:
+            return
+        if self._active_block_move_undo_id != block_id:
+            self._undo_stack.append({"type": "block_geometry", "block_id": block_id,
+                                     "before": list(block.bbox), "original_block": deepcopy(block)})
+            self._active_block_move_undo_id = block_id
+        regions[index]["bbox"] = bbox
+        same_page = [r["bbox"] for r in regions if r["page"] == block.page]
+        union = [min(b[0] for b in same_page), min(b[1] for b in same_page),
+                 max(b[2] for b in same_page), max(b[3] for b in same_page)]
+        # The individual piece already moved; do not translate its siblings.
+        block.bbox = union
+        self._set_block_geometry(block, union)
+
+    def _on_viewer_block_moved(self, block_id: str, bbox: list[float]) -> None:
+        if self.document is None:
+            return
+        block = next((entry for entry in self.document.blocks if entry.id == block_id), None)
+        if block is None or self._article_locked(block):
+            return
+        if len(bbox) != 4:
+            return
+        new_bbox = [float(value) for value in bbox]
+        if not all(math.isfinite(value) for value in new_bbox):
+            return
+        bounds = block.metadata.get("visible_area")
+        if isinstance(bounds, (list, tuple)) and len(bounds) == 4:
+            new_bbox = [
+                max(bounds[0], min(bounds[2], new_bbox[0])),
+                max(bounds[1], min(bounds[3], new_bbox[1])),
+                max(bounds[0], min(bounds[2], new_bbox[2])),
+                max(bounds[1], min(bounds[3], new_bbox[3])),
+            ]
+        if new_bbox[2] - new_bbox[0] < 5 or new_bbox[3] - new_bbox[1] < 5:
+            return
+        if new_bbox == block.bbox:
+            return
+        if self._active_block_move_undo_id != block_id:
+            self._undo_stack.append({
+                "type": "block_geometry", "block_id": block_id, "before": list(block.bbox),
+                "original_block": deepcopy(block),
+            })
+            self._active_block_move_undo_id = block_id
+        self._set_block_geometry(block, new_bbox)
+
+    def _on_viewer_block_edit_finished(self, block_id: str) -> None:
+        if self._active_block_move_undo_id == block_id:
+            self._active_block_move_undo_id = None
+            action = self._undo_stack[-1] if self._undo_stack else None
+            block = next((b for b in self.document.blocks if b.id == block_id), None)
+            if action and block is not None and action.get("block_id") == block_id:
+                before = action["before"]
+                # Moving a box preserves its text. Only shrinking partitions it.
+                shrinking = (block.width < before[2] - before[0] - 0.1
+                             or block.height < before[3] - before[1] - 0.1)
+                source = self.document.metadata.get("source_pdf")
+                # Merged groups keep their text together when an individual
+                # outline is adjusted. Unmerged boxes retain split-on-resize.
+                if shrinking and not block.metadata.get("merged_regions") and source and Path(str(source)).is_file():
+                    try:
+                        result = split_resized_block(action["original_block"], block.bbox, source)
+                    except (OSError, ValueError, RuntimeError) as error:
+                        result = None
+                        self._log(f"Could not split resized text safely: {error}")
+                    if result is not None:
+                        fragments, selected_id = result
+                        action["split_ids"] = [b.id for b in fragments]
+                        action["document_metadata"] = deepcopy(self.document.metadata)
+                        index = self.document.blocks.index(block)
+                        self.document.blocks[index:index + 1] = fragments
+                        for segments in self.document.metadata.values():
+                            if isinstance(segments, list):
+                                for segment in segments:
+                                    if isinstance(segment, dict) and isinstance(segment.get("block_ids"), list):
+                                        segment["block_ids"] = [
+                                            new_id for old_id in segment["block_ids"]
+                                            for new_id in (action["split_ids"] if old_id == block_id else [old_id])
+                                        ]
+                        self._selected_block_ids = {selected_id}
+                        self._refresh_resize_split(selected_id)
+                        self._log(f"Split resized text into {len(fragments)} blocks; all text retained.")
+                        return
+                    # If the PDF cannot be matched exactly, keep the original
+                    # visible coverage rather than strand text outside its box.
+                    self._set_block_geometry(block, before)
+                    self._undo_stack.pop()
+                    self._log("Resize kept unchanged: no safe text split was found.")
+                    return
+            self._log(f"Adjusted text block {block_id}")
+
+    def _refresh_resize_split(self, selected_id: str) -> None:
+        self._invalidate_segment_identity()
+        self._update_document_model()
+        self.viewer.set_blocks([asdict(b) for b in self.document.blocks])
+        self._populate_tree()
+        self.viewer.set_selected_blocks(self._selected_block_ids, selected_id, navigate_to_primary=False)
+        self._update_selection_status()
+        self._update_selection_panel()
+        self._update_html_preview()
+        self._select_block_by_id(selected_id, preserve_selection=True, navigate=False)
 
     def _on_viewer_zone_moved(self, zone_id: str, bbox: list[float]) -> None:
         """Persist a dragged zone location back to the document."""
@@ -6403,6 +7187,8 @@ class MainWindow(QMainWindow):
                 previous_role = block.role
                 previous_roles[block.id] = previous_role
                 block.role = new_role
+                block.metadata["role_source"] = "manual"
+                block.confidence = 1.0
                 self._sync_block_abstract_number_role(block, previous_role)
                 if previous_role == "title" and new_role != "title":
                     self._clear_manual_title_metadata_if_needed(block.id)
@@ -6454,11 +7240,13 @@ class MainWindow(QMainWindow):
         previous_roles: dict[str, str] = {}
         changed_blocks = []
         for block in selected_blocks:
-            if block.role == new_role:
+            if block.role == new_role and block.metadata.get("role_source") == "manual":
                 continue
             previous_role = block.role
             previous_roles[block.id] = previous_role
             block.role = new_role
+            block.metadata["role_source"] = "manual"
+            block.confidence = 1.0
             self._sync_block_abstract_number_role(block, previous_role)
             if previous_role == "title" and new_role != "title":
                 self._clear_manual_title_metadata_if_needed(block.id)
@@ -6483,10 +7271,12 @@ class MainWindow(QMainWindow):
         # the Finish button and the delete/split state all have to follow.
         self._refresh_article_buttons()
         block_id = title_block_id or next(iter(self._selected_block_ids))
-        self.viewer.set_selected_blocks(self._selected_block_ids, block_id)
+        self.viewer.set_selected_blocks(
+            self._selected_block_ids, block_id, navigate_to_primary=False
+        )
         self._update_selection_status()
         self._update_selection_panel()
-        self._select_block_by_id(block_id, preserve_selection=True)
+        self._select_block_by_id(block_id, preserve_selection=True, navigate=False)
         self._update_selection_panel()
         self._log(f"Reassigned {len(changed_blocks)} block(s) to role '{new_role}'")
 
@@ -6538,4 +7328,4 @@ class MainWindow(QMainWindow):
         if value is None:
             return ""
         text = str(value)
-        return "".join(ch for ch in text if ch in "\t\n\r" or ord(ch) >= 0x20)
+        return "".join(ch for ch in text if ch in "\t\r\n\r" or ord(ch) >= 0x20)

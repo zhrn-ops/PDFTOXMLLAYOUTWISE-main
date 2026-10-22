@@ -18,6 +18,34 @@ def test_surname_first_author_list_keeps_initials_and_surname_apart():
     ]
 
 
+def test_initials_only_names_do_not_become_given_names():
+    linked = AuthorLinker().link_from_texts(
+        ["Sheu J-Y1, Chen J-Y2, Wu V-C3, Chueh J.S.1, Tseng C-S.1"], []
+    )
+
+    assert [(a.given_names, a.initials, a.surname) for a in linked.authors] == [
+        ("", "JY.", "Sheu"),
+        ("", "JY.", "Chen"),
+        ("", "VC.", "Wu"),
+        ("", "J.S.", "Chueh"),
+        ("", "CS.", "Tseng"),
+    ]
+
+
+def test_pdf_author_line_with_abbreviated_hyphenated_initials_splits_all_authors():
+    linked = AuthorLinker().link_from_texts(
+        ["Sheu J-Y1, Chen J-Y2, Wu V-C3, Chueh J.S.1, Tseng C-S.1"], []
+    )
+
+    assert [(a.display_name, a.given_names, a.surname) for a in linked.authors] == [
+        ("Sheu J-Y", "", "Sheu"),
+        ("Chen J-Y", "", "Chen"),
+        ("Wu V-C", "", "Wu"),
+        ("Chueh J.S.", "", "Chueh"),
+        ("Tseng C-S.", "", "Tseng"),
+    ]
+
+
 def test_address_tails_are_not_turned_into_authors():
     """"Los Angeles" and "San Diego" used to be emitted as authors here."""
 
@@ -96,7 +124,8 @@ def test_glued_letter_markers_are_removed_from_names_and_affiliation_labels():
         ],
     )
 
-    assert [affiliation.id for affiliation in linked.affiliations] == ["a", "b", "c", "d", "e"]
+    # Referenced affiliations follow first author mention; unused b and d follow.
+    assert [affiliation.id for affiliation in linked.affiliations] == ["a", "c", "e", "b", "d"]
     assert linked.authors[1].surname == "Savage"
     assert linked.authors[1].affiliation_ids == ["a"]
     assert linked.authors[2].surname == "Kirkham"
@@ -304,6 +333,21 @@ def test_wrapped_byline_rows_split_on_line_breaks():
     assert linked.authors[0].affiliation_ids == ["aff_1"]
     assert linked.authors[1].affiliation_ids == []
     assert [aff.text for aff in linked.affiliations] == ["Oak Ridge National Laboratory"]
+
+
+def test_wrapped_marked_surname_stays_with_its_given_name():
+    """Splitting byline rows must preserve a name that crosses a row boundary."""
+
+    linked = AuthorLinker().link_from_texts(
+        ["Jane Doe1, Vania\nHungria2"],
+        ["1 Alpha University; 2 Beta University"],
+    )
+
+    assert [author.display_name for author in linked.authors] == [
+        "Jane Doe",
+        "Vania Hungria",
+    ]
+    assert [author.affiliation_ids for author in linked.authors] == [["1"], ["2"]]
 
 
 def test_printed_single_affiliation_is_still_shared_by_every_author():

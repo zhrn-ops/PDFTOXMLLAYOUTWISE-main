@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<units xmlns="http://www.elsevier.com/xml/ani/ani"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns:ce="http://www.elsevier.com/xml/ani/common"
+        xsi:schemaLocation="http://www.elsevier.com/xml/ani/ani http://www.elsevier.com/xml/ani/ani515-input-CAR.xsd">
+<unit>
+<unit-info>
+<unit-id></unit-id>
+<order-id></order-id>
+<parcel-id></parcel-id>
+<supplier-id></supplier-id>
+<timestamp></timestamp>
+</unit-info>
+<unit-content>
+<bibrecord>
+<item-info>
+<status state="new" stage="S300"/>
+<itemidlist>
+<ce:pii></ce:pii>
+<ce:doi></ce:doi>
+<ce:ern></ce:ern>
+<itemid idtype="TPA-ID"></itemid>
+<itemid idtype="IPUI"></itemid>
+<itemid idtype="ARXIV"></itemid>
+</itemidlist>
+</item-info>
+<head>
+<citation-info>
+<citation-type code=""/>
+<citation-language xml:lang=""/>
+<abstract-language xml:lang=""/>
+<author-keywords>
+<author-keyword></author-keyword>
+<author-keyword></author-keyword>
+<author-keyword></author-keyword>
+</author-keywords>
+</citation-info>
+<related-item type="original">
+<itemidlist>
+<ce:pii></ce:pii>
+<ce:doi></ce:doi>
+</itemidlist>
+</related-item>
+<citation-title>
+<titletext xml:lang="" original="y"></titletext>
+</citation-title>
+<author-group seq="">
+<author seq="" author-instance-id="" orcid="">
+<ce:initials></ce:initials>
+<ce:degrees></ce:degrees>
+<ce:surname></ce:surname>
+<ce:given-name></ce:given-name>
+<ce:suffix></ce:suffix>
+<ce:e-address></ce:e-address>
+</author>
+<collaboration seq="" collaboration-instance-id="">
+<ce:text></ce:text>
+</collaboration>
+<et-al/>
+<affiliation affiliation-instance-id="">
+<organization></organization>
+<address-part></address-part>
+<city></city>
+<state></state>
+<postal-code></postal-code>
+<country iso-code=""/>
+<ce:source-text></ce:source-text>
+</affiliation>
+</author-group>
+<correspondence>
+<person>
+<ce:initials></ce:initials>
+<ce:degrees></ce:degrees>
+<ce:surname></ce:surname>
+<ce:given-name></ce:given-name>
+<ce:suffix></ce:suffix>
+</person>
+<affiliation>
+<organization></organization>
+<address-part></address-part>
+<city></city>
+<state></state>
+<postal-code></postal-code>
+<country iso-code=""/>
+<ce:source-text></ce:source-text>
+</affiliation>
+<ce:e-address></ce:e-address>
+</correspondence>
+<grantlist>
+<grant>
+<grant-id></grant-id>
+<grant-acronym></grant-acronym>
+<grant-agency>
+<organization></organization>
+<address-part></address-part>
+<city></city>
+<state></state>
+<postal-code></postal-code>
+<country iso-code=""/>
+</grant-agency>
+<grant-agency-id></grant-agency-id>
+</grant>
+<grant-text></grant-text>
+</grantlist>
+<abstracts>
+<abstract original="y" xml:lang="">
+<publishercopyright></publishercopyright>
+<ce:para></ce:para>
+</abstract>
+</abstracts>
+<source srcid="">
+<sourcetitle></sourcetitle>
+<sourcetitle-abbrev></sourcetitle-abbrev>
+<volumetitle></volumetitle>
+<issuetitle></issuetitle>
+<issn></issn>
+<isbn type="electronic"></isbn>
+<isbn type="print"></isbn>
+<isbn type="print" length="10"></isbn>
+<volisspag>
+<page-information>
+<pages>
+<first-page></first-page>
+<last-page></last-page>
+</pages>
+<pages-text></pages-text>
+<pagecount></pagecount>
+</page-information>
+</volisspag>
+<article-number></article-number>
+<publicationyear first="" last=""/>
+<publicationdate>
+<year></year>
+<month></month>
+<day></day>
+<date-text></date-text>
+</publicationdate>
+<website type="item">
+<ce:e-address type="url"></ce:e-address>
+</website>
+<publisher>
+<publishername></publishername>
+</publisher>
+<additional-srcinfo>
+<conferenceinfo>
+<confevent-id></confevent-id>
+</conferenceinfo>
+<reportinfo>
+<reportnumber></reportnumber>
+</reportinfo>
+</additional-srcinfo>
+</source>
+</head>
+<tail>
+<bibliography refcount="">
+<reference seq="">
+<ref-info>
+<ref-title>
+<ref-titletext-english></ref-titletext-english>
+<ref-titletext-nonenglish></ref-titletext-nonenglish>
+</ref-title>
+<itemidlist>
+<ce:pii></ce:pii>
+<ce:doi></ce:doi>
+<itemid idtype="ARXIV"></itemid>
+<itemid idtype="PUI"></itemid>
+<itemid idtype="CARID"></itemid>
+<itemid idtype="OSIN"></itemid>
+<itemid idtype="ABSTRACTNUMBER"></itemid>
+<itemid idtype="PATN"></itemid>
+<itemid idtype="REPN"></itemid>
+<itemid idtype="ARTNUM"></itemid>
+<itemid idtype="ISSN"></itemid>
+<itemid idtype="ISBN"></itemid>
+<itemid idtype="CODENCODE"></itemid>
+<itemid idtype="PMID"></itemid>
+<itemid idtype="PUBN"></itemid>
+<itemid idtype="MEDL"></itemid>
+<itemid idtype="LEGAL"></itemid>
+</itemidlist>
+<ref-authors>
+<author seq="">
+<ce:initials></ce:initials>
+<ce:degrees></ce:degrees>
+<ce:surname></ce:surname>
+<ce:given-name></ce:given-name>
+<ce:suffix></ce:suffix>
+<ce:e-address></ce:e-address>
+</author>
+<collaboration seq="">
+<ce:text></ce:text>
+</collaboration>
+<et-al/>
+</ref-authors>
+<ref-sourcetitle></ref-sourcetitle>
+<ref-sourcetitle-abbrev></ref-sourcetitle-abbrev>
+<ref-publicationyear first="" last=""/>
+<volisspag>
+<volume-issue-number>
+<issue-designation></issue-designation>
+<vol-first></vol-first>
+<vol-last></vol-last>
+<vol-text></vol-text>
+<iss-first></iss-first>
+<iss-last></iss-last>
+<iss-text></iss-text>
+<part></part>
+<suppl></suppl>
+<suppl-text></suppl-text>
+<special-issue-text></special-issue-text>
+</volume-issue-number>
+<page-information>
+<pages>
+<first-page></first-page>
+<last-page></last-page>
+</pages>
+<pages-text></pages-text>
+<pagecount></pagecount>
+</page-information>
+</volisspag>
+<ref-website>
+<websitename></websitename>
+<ce:e-address type="url"></ce:e-address>
+</ref-website>
+<ref-text></ref-text>
+</ref-info>
+<ref-fulltext></ref-fulltext>
+<ce:source-text></ce:source-text>
+</reference>
+</bibliography>
+</tail>
+</bibrecord>
+</unit-content>
+</unit>
+</units>

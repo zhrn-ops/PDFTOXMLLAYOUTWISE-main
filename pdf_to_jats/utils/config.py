@@ -12,7 +12,7 @@ from pathlib import Path
 class AppConfig:
     """Runtime configuration for the application."""
 
-    app_name: str = "PDF to JATS 1.4 Scientific Article Converter"
+    app_name: str = "PDF to XML Scientific Article Converter"
     openrouter_model: str = "openrouter/free"
     openrouter_fallback_models: str = ""
     openrouter_api_key: str = ""

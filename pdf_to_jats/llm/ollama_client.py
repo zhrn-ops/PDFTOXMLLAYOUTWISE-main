@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import time
 from typing import Any
 import urllib.request
 
@@ -14,7 +15,10 @@ class OllamaClient:
     base_url: str = "http://localhost:11434"
     timeout_seconds: float = 120.0
 
-    def classify(self, prompt: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def classify(self, prompt: str, payload: dict[str, Any], progress=None) -> dict[str, Any]:
+        report = progress or (lambda message: None)
+        started = time.perf_counter()
+        report("Preparing Qwen request...")
         body = json.dumps(
             {
                 "model": self.model,
@@ -36,8 +40,26 @@ class OllamaClient:
             data=body,
             headers={"Content-Type": "application/json"},
         )
+        report(f"Preparing Qwen request: {time.perf_counter() - started:.2f} seconds.")
+        sent = time.perf_counter()
+        report("Waiting for Qwen to process the prompt and generate its response...")
         with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
             raw = json.loads(response.read().decode("utf-8"))
+        elapsed = time.perf_counter() - sent
+        report(f"Qwen request round trip: {elapsed:.2f} seconds.")
+        for field, label in (
+            ("load_duration", "Model loading"),
+            ("prompt_eval_duration", "Prompt processing"),
+            ("eval_duration", "Response generation"),
+            ("total_duration", "Total server processing"),
+        ):
+            duration = raw.get(field)
+            if isinstance(duration, (int, float)) and duration >= 0:
+                report(f"Qwen {label}: {duration / 1_000_000_000:.2f} seconds.")
+        if isinstance(raw.get("total_duration"), (int, float)):
+            overhead = max(0, elapsed - raw["total_duration"] / 1_000_000_000)
+            report(f"Qwen transport/client overhead (approximate): {overhead:.2f} seconds.")
+        report("Parsing Qwen's structured response...")
         text = ((raw.get("message") or {}).get("content") or "")
         if isinstance(text, list):
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))

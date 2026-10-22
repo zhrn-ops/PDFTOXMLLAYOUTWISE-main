@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 
 ROLE_OPTIONS = [
+    "unclassified",
     "title",
     "author",
     "corresponding_author",
@@ -62,7 +63,7 @@ class StructureTree(QTreeWidget):
         header.setStretchLastSection(True)
         self.setItemDelegateForColumn(1, RoleDelegate(self))
         self.categories: dict[str, QTreeWidgetItem] = {}
-        for label in ["Title", "Authors", "Corresponding Author", "Affiliations", "Abstract", "Abstract Number", "Keywords"]:
+        for label in ["Title", "Authors", "Corresponding Author", "Affiliations", "Abstract", "Abstract Number", "Keywords", "Other / Unclassified"]:
             item = QTreeWidgetItem([label, ""])
             item.setFlags(item.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
             self.addTopLevelItem(item)

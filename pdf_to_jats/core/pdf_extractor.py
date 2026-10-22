@@ -13,6 +13,7 @@ import fitz
 
 from pdf_to_jats.models.block import TextBlock, reading_order_key
 from pdf_to_jats.models.document import Document
+from pdf_to_jats.core.inline_script_detector import InlineScriptDetector
 
 try:  # numpy turns the per-line ink scan into C-speed slicing; it is optional.
     import numpy as _numpy
@@ -67,6 +68,7 @@ class PDFExtractor:
         self.visible_text_only = visible_text_only
         self.dark_threshold = dark_threshold
         self.use_docling = use_docling
+        self.inline_script_detector = InlineScriptDetector()
         # Marker blocks from the last extract() call, used to infer the column
         # each article segment owns.
         self._marker_blocks: list[TextBlock] = []
@@ -145,10 +147,12 @@ class PDFExtractor:
                                 # block, so carrying it here made asdict() and JSON
                                 # export deep-copy that block once per line.
                                 "line_index": line_index,
+                                "text_spans": self._script_spans(spans),
                                 "visible_area": [float(visible_area.x0), float(visible_area.y0), float(visible_area.x1), float(visible_area.y1)],
                                 "visible_text_only": self.visible_text_only,
                                 "noise_candidate": self._is_noise_candidate(text),
                             },
+                            inline_runs=self.inline_script_detector.detect(text.strip(), spans),
                         )
                         self._attach_docling_evidence(extracted, docling_items)
                         page_blocks.append(extracted)
@@ -267,6 +271,23 @@ class PDFExtractor:
 
     def _line_text(self, spans: list[dict[str, Any]]) -> str:
         return "".join(span.get("text", "") for span in spans)
+
+    @staticmethod
+    def _script_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Retain span geometry and size for later title/abstract script detection."""
+        result = []
+        for span in spans:
+            text = str(span.get("text", ""))
+            bbox = span.get("bbox") or [0, 0, 0, 0]
+            origin = span.get("origin") or [0, 0]
+            result.append({
+                "text": text,
+                "size": float(span.get("size", 0.0)),
+                "flags": int(span.get("flags", 0)),
+                "bbox": [float(value) for value in bbox],
+                "origin": [float(value) for value in origin],
+            })
+        return result
 
     def _is_noise_candidate(self, text: str) -> bool:
         """Flag likely noise without deleting it from the editable document."""

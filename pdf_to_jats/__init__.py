@@ -1,2 +1,2 @@
-"""PDF to JATS 1.4 Scientific Article Converter."""
+"""PDF to XML Scientific Article Converter."""
 

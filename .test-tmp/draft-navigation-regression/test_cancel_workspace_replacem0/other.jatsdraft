@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "active": "|other.xml",
+  "articles": {
+    "|other.xml": {
+      "generated_xml": "<article><article-title>Replacement</article-title><abstract><p>Text</p></abstract></article>",
+      "xml": "<?xml version='1.0' encoding='UTF-8'?>\n<article>\n  <article-title>Replacement</article-title>\n  <abstract>\n    <p>Text</p>\n  </abstract>\n</article>\n",
+      "raw": "<?xml version='1.0' encoding='UTF-8'?>\n<article>\n  <article-title>Replacement</article-title>\n  <abstract>\n    <p>Text</p>\n  </abstract>\n</article>\n",
+      "path": "other.xml",
+      "source": "",
+      "pdf": "",
+      "dirty": false,
+      "history": [
+        "<?xml version='1.0' encoding='UTF-8'?>\n<article>\n  <article-title>Replacement</article-title>\n  <abstract>\n    <p>Text</p>\n  </abstract>\n</article>\n"
+      ],
+      "history_index": 0
+    }
+  },
+  "workflow": null
+}

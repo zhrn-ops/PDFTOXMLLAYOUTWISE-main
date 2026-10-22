@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "active": "|article.xml",
+  "articles": {
+    "|article.xml": {
+      "generated_xml": "<article><article-title>Initial</article-title><abstract><p>Text</p></abstract></article>",
+      "xml": "<?xml version='1.0' encoding='UTF-8'?>\n<article>\n  <article-title>Corrected</article-title>\n  <abstract>\n    <p>Text</p>\n  </abstract>\n</article>\n",
+      "raw": "<unfinished",
+      "path": "article.xml",
+      "source": "",
+      "pdf": "",
+      "dirty": true,
+      "history": [
+        "<?xml version='1.0' encoding='UTF-8'?>\n<article>\n  <article-title>Initial</article-title>\n  <abstract>\n    <p>Text</p>\n  </abstract>\n</article>\n",
+        "<?xml version='1.0' encoding='UTF-8'?>\n<article>\n  <article-title>Corrected</article-title>\n  <abstract>\n    <p>Text</p>\n  </abstract>\n</article>\n"
+      ],
+      "history_index": 1
+    }
+  },
+  "workflow": null
+}

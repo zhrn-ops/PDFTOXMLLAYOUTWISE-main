@@ -199,6 +199,47 @@ def test_marker_workflow_updates_the_document_model():
     assert segments[1]["abstract_number_block_id"] == "block_901"
 
 
+def test_explicit_flow_marker_does_not_start_an_article():
+    document = _document_with_blocks()
+    window = _window(document)
+    window._startup_flow = True
+    window._explicit_number_workflow = True
+    marker = document.blocks[3]
+    marker.role = "abstract_number"
+
+    window._sync_block_abstract_number_role(marker, "unclassified")
+
+    assert not document.metadata.get("article_segments")
+    assert document.abstract_number() == "ABSN"
+    assert document.metadata["abstract_number_block_ids"] == [marker.id]
+
+
+def test_explicit_flow_marker_does_not_split_or_rename_an_article():
+    document = _document_with_blocks()
+    window = _window(document)
+    window._startup_flow = True
+    window._explicit_number_workflow = True
+    segment = {
+        "index": 1,
+        "article_key": "block_001",
+        "abstract_number": "CUSTOM-100",
+        "block_ids": [block.id for block in document.blocks],
+        "start_page": 1,
+        "end_page": 1,
+    }
+    document.metadata["article_segments"] = [segment]
+    window._current_segment_key = "block_001"
+    before = dict(segment)
+    marker = document.blocks[3]
+    marker.role = "abstract_number"
+
+    window._sync_block_abstract_number_role(marker, "unclassified")
+
+    assert document.metadata["article_segments"] == [before]
+    assert window._current_segment_key == "block_001"
+    assert document.metadata["abstract_number_block_ids"] == [marker.id]
+
+
 def test_full_name_author_list_is_classified_as_author():
     """Regression: bold-italic author lines used to glue onto the title."""
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from pdf_to_jats.core.inline_script_detector import join_text_and_runs
 from pdf_to_jats.models.block import TextBlock
 from pdf_to_jats.models.paragraph import Paragraph
 
@@ -29,17 +30,21 @@ class ParagraphReconstructor:
             if not metadata.get("is_paragraph_unit"):
                 continue
             source_ids = [str(value) for value in metadata.get("source_line_ids", [])]
+            text, inline_runs = join_text_and_runs(
+                [(block.text, block.inline_runs)], " "
+            )
             accepted.append(
                 Paragraph(
                     id=f"paragraph_{block.id}",
                     page=block.page,
                     column=int(metadata.get("column", 0)),
-                    text=" ".join(block.text.split()),
+                    text=text,
                     bbox=list(block.bbox),
                     source_line_ids=source_ids or [block.id],
                     role="body" if block.role == "unclassified" else block.role,
                     status="accepted",
                     continued_from=[str(value) for value in metadata.get("continuation_from", [])],
+                    inline_runs=inline_runs,
                 )
             )
         return sorted(accepted, key=lambda item: (item.page, item.column, item.bbox[1], item.bbox[0]))
@@ -92,11 +97,15 @@ class ParagraphReconstructor:
             min(block.bbox[0] for block in blocks), min(block.bbox[1] for block in blocks),
             max(block.bbox[2] for block in blocks), max(block.bbox[3] for block in blocks),
         ]
+        text, inline_runs = join_text_and_runs(
+            [(block.text, block.inline_runs) for block in blocks], " "
+        )
         return Paragraph(
             id=f"proposal_p{page:03d}_c{column:02d}_{index:03d}",
             page=page,
             column=column,
-            text=" ".join(" ".join(block.text.split()) for block in blocks),
+            text=text,
             bbox=bbox,
             source_line_ids=[block.id for block in blocks],
+            inline_runs=inline_runs,
         )

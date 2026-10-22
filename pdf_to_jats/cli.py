@@ -78,7 +78,7 @@ class Converter:
             }
 
         before = snapshot()
-        self.window._load_pdf_path(str(pdf_path))
+        self.window._load_pdf_path(str(pdf_path), wait=True)
         if self.window.document is None:
             raise RuntimeError(f"Extraction produced no document for {pdf_path}")
         self.window.run_auto_pipeline()

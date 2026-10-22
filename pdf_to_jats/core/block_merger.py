@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+from pdf_to_jats.core.inline_script_detector import shift_trimmed_runs
 from pdf_to_jats.models.block import TextBlock
 
 LOGGER = logging.getLogger(__name__)
@@ -89,6 +90,17 @@ class BlockMerger:
         ]
         text_parts = [first.text.rstrip(), second.text.lstrip()]
         merged_text = "\n".join(part for part in text_parts if part)
+        first_end = len(first.text.rstrip())
+        second_start = len(second.text) - len(second.text.lstrip())
+        first_runs = shift_trimmed_runs(first.text, first.inline_runs, 0, first_end, 0)
+        second_offset = first_end + (1 if text_parts[0] and text_parts[1] else 0)
+        second_runs = shift_trimmed_runs(
+            second.text,
+            second.inline_runs,
+            second_start,
+            len(second.text),
+            second_offset,
+        )
         metadata: dict[str, Any] = dict(first.metadata)
         metadata.setdefault("merged_block_ids", []).append(second.id)
         metadata["merged_from"] = [first.id, second.id]
@@ -103,6 +115,7 @@ class BlockMerger:
             width=max(bbox[2] - bbox[0], first.width, second.width),
             height=max(bbox[3] - bbox[1], first.height, second.height),
             metadata=metadata,
+            inline_runs=first_runs + second_runs,
         )
 
     def _horizontal_overlap_ratio(self, first: TextBlock, second: TextBlock) -> float:

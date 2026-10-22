@@ -27,6 +27,7 @@ class TextBlock:
     confidence: float = 0.0
     role: str = "unclassified"
     metadata: dict[str, Any] = field(default_factory=dict)
+    inline_runs: list[dict[str, Any]] = field(default_factory=list)
 
 
 def reading_order_key(block: TextBlock) -> tuple[int, float, float]:

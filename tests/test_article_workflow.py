@@ -786,13 +786,13 @@ def test_abstract_role_blocks_reach_the_generated_xml(tmp_path):
 
 
 def _finishable_window(document: Document, output) -> MainWindow:
-    """A window whose XML export is stubbed so the finish flow runs headless."""
+    """A window whose XML draft preparation is stubbed for headless finishing."""
 
     window = _window(document)
     window.config = SimpleNamespace(generated_xml_dir=output, output_dir=output)
     window.linker = AuthorLinker()
     window.viewer = None
-    window._export_article_xml = lambda segment: (output / "article.xml", [])
+    window._prepare_article_xml_draft = lambda segment: (output / "article.xml", [])
     window._refresh_after_article_change = lambda: None
     window._warn_locked_blocks = lambda blocks: None
     window._startup_flow = True
@@ -811,7 +811,7 @@ def _headless_window(document: Document) -> MainWindow:
     window._sync_tree_selection = lambda: None
     window._update_selection_status = lambda: None
     window._update_selection_panel = lambda: None
-    window._select_block_by_id = lambda block_id, preserve_selection=False: None
+    window._select_block_by_id = lambda block_id, preserve_selection=False, navigate=True: None
     window.viewer = SimpleNamespace(
         set_blocks=lambda *args, **kwargs: None,
         set_zones=lambda *args, **kwargs: None,
@@ -982,7 +982,7 @@ def test_a_refused_finish_leaves_the_articles_unsplit(tmp_path):
 
     document = _stacked_page_document()
     window = _finishable_window(document, tmp_path)
-    window._export_article_xml = lambda segment: (None, [SimpleNamespace(message="no title")])
+    window._prepare_article_xml_draft = lambda segment: (None, [SimpleNamespace(message="no title")])
     window._selected_block_ids = {"block_004", "block_005"}
 
     window.finish_selected_article()
@@ -1593,9 +1593,6 @@ def test_export_article_xml_validates_and_writes_the_linked_document(tmp_path):
             "affiliations": [{"marker": "1", "text": "Alpha University, USA"}],
         }
     )
-    # The stubbed finish path is bypassed so the real export runs.
-    del window._export_article_xml
-
     segment = window._segment_for_key("a1")
     _path, validation_errors = window._export_article_xml(segment)
 

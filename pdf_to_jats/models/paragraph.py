@@ -18,3 +18,4 @@ class Paragraph:
     role: str = "body"
     status: str = "proposed"
     continued_from: list[str] = field(default_factory=list)
+    inline_runs: list[dict[str, object]] = field(default_factory=list)
