@@ -18,6 +18,34 @@ def test_surname_first_author_list_keeps_initials_and_surname_apart():
     ]
 
 
+def test_initials_only_names_do_not_become_given_names():
+    linked = AuthorLinker().link_from_texts(
+        ["Sheu J-Y1, Chen J-Y2, Wu V-C3, Chueh J.S.1, Tseng C-S.1"], []
+    )
+
+    assert [(a.given_names, a.initials, a.surname) for a in linked.authors] == [
+        ("", "JY.", "Sheu"),
+        ("", "JY.", "Chen"),
+        ("", "VC.", "Wu"),
+        ("", "J.S.", "Chueh"),
+        ("", "CS.", "Tseng"),
+    ]
+
+
+def test_pdf_author_line_with_abbreviated_hyphenated_initials_splits_all_authors():
+    linked = AuthorLinker().link_from_texts(
+        ["Sheu J-Y1, Chen J-Y2, Wu V-C3, Chueh J.S.1, Tseng C-S.1"], []
+    )
+
+    assert [(a.display_name, a.given_names, a.surname) for a in linked.authors] == [
+        ("Sheu J-Y", "", "Sheu"),
+        ("Chen J-Y", "", "Chen"),
+        ("Wu V-C", "", "Wu"),
+        ("Chueh J.S.", "", "Chueh"),
+        ("Tseng C-S.", "", "Tseng"),
+    ]
+
+
 def test_address_tails_are_not_turned_into_authors():
     """"Los Angeles" and "San Diego" used to be emitted as authors here."""
 

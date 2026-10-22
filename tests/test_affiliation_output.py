@@ -142,6 +142,56 @@ def test_given_name_is_inferred_when_missing(tmp_path):
     assert given_name.text == "Jane"
 
 
+def test_given_name_only_emits_given_name_without_empty_name_elements(tmp_path):
+    groups = _groups(
+        tmp_path,
+        _document([Author(given_names="Jane", display_name="Jane")], []),
+    )
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    assert author.find(_ce("given-name")).text == "Jane"
+    assert author.find(_ce("initials")) is None
+    assert author.find(_ce("surname")) is None
+
+
+def test_initials_only_emits_initials_without_empty_name_elements(tmp_path):
+    groups = _groups(
+        tmp_path,
+        _document([Author(initials="J.Q.", display_name="J.Q.")], []),
+    )
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    assert author.find(_ce("initials")).text == "J.Q."
+    assert author.find(_ce("given-name")) is None
+    assert author.find(_ce("surname")) is None
+
+
+def test_pdf_initials_only_author_omits_given_name_element(tmp_path):
+    linked = AuthorLinker().link_from_texts(["Sheu J-Y1"], [])
+    groups = _groups(tmp_path, _document(linked.authors, linked.affiliations))
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    assert author.find(_ce("initials")).text == "JY."
+    assert author.find(_ce("surname")).text == "Sheu"
+    assert author.find(_ce("given-name")) is None
+
+
+def test_llm_initials_only_author_does_not_emit_given_name(tmp_path):
+    linked = AuthorLinker().link_from_llm_response(
+        {"authors": [{"display_name": "J-Y Sheu", "given_names": "J-Y", "initials": "J.-Y.", "surname": "Sheu"}]}
+    )
+    groups = _groups(tmp_path, _document(linked.authors, linked.affiliations))
+
+    author = groups[0].find(_q("author"))
+    assert author is not None
+    assert author.find(_ce("initials")).text == "J.-Y."
+    assert author.find(_ce("surname")).text == "Sheu"
+    assert author.find(_ce("given-name")) is None
+
+
 def test_glued_affiliation_labels_are_detected():
     linked = AuthorLinker().link_from_texts(
         ["Jane Doe1", "John Smith21"],

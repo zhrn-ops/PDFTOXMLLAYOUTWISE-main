@@ -1944,6 +1944,30 @@ class MainWindow(QMainWindow):
                 f"Cannot finish article {segment.get('abstract_number', '')}: "
                 f"{'; '.join(error.message for error in validation_errors)}"
             )
+            if any("missing title" in error.message.casefold() for error in validation_errors):
+                # Keep the failed article ready for correction. The selection
+                # may still point at an abstract or author block, leaving the
+                # title role target out of sight after the warning is closed.
+                self._current_segment_key = key
+                blocks_by_id = {block.id: block for block in self.document.blocks}
+                title_id = str(segment.get("title_block_id") or "")
+                if title_id not in blocks_by_id:
+                    title_id = next(
+                        (
+                            block_id
+                            for block_id in self._segment_member_ids(segment)
+                            if block_id in blocks_by_id
+                        ),
+                        "",
+                    )
+                if title_id:
+                    self._selected_block_ids = {title_id}
+                    self._selected_zone_id = None
+                    self._selected_zone_ids.clear()
+                    self._refresh_selected_blocks_view()
+                    self.viewer.set_selected_blocks(self._selected_block_ids, title_id)
+                    self._select_block_by_id(title_id, preserve_selection=True)
+                    self._show_work_tab(self.TAB_PROPERTIES)
             QMessageBox.warning(
                 self,
                 "Article needs review",

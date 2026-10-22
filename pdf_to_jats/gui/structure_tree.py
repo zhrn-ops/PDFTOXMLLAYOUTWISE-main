@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 
 ROLE_OPTIONS = [
+    "unclassified",
     "title",
     "author",
     "corresponding_author",

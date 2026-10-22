@@ -140,9 +140,14 @@ class JATSGenerator:
                     initials = initials or parsed_initials
                     given_names = given_names or parsed_given_names
                     surname = surname or parsed_surname
-                etree.SubElement(author_el, self._qname("initials", self.CE_NS)).text = initials
-                etree.SubElement(author_el, self._qname("given-name", self.CE_NS)).text = given_names
-                etree.SubElement(author_el, self._qname("surname", self.CE_NS)).text = surname
+                if initials and given_names and self._name_token_is_initials(given_names):
+                    given_names = ""
+                if initials:
+                    etree.SubElement(author_el, self._qname("initials", self.CE_NS)).text = initials
+                if given_names:
+                    etree.SubElement(author_el, self._qname("given-name", self.CE_NS)).text = given_names
+                if surname:
+                    etree.SubElement(author_el, self._qname("surname", self.CE_NS)).text = surname
                 if author.degrees.strip():
                     etree.SubElement(author_el, self._qname("degrees", self.CE_NS)).text = self._sanitize_xml_text(author.degrees)
             if affiliation is not None:
@@ -260,6 +265,16 @@ class JATSGenerator:
         given = parts[:surname_start]
         initials = "".join(f"{part[0].upper()}." for part in given)
         return initials, " ".join(given), " ".join(parts[surname_start:])
+
+    @staticmethod
+    def _name_token_is_initials(value: str) -> bool:
+        """Return true when a purported given name is only initials."""
+
+        tokens = value.split()
+        return bool(tokens) and all(
+            re.fullmatch(r"(?:[A-Z](?:\.|-))+(?:[A-Z])?\.?", token)
+            for token in tokens
+        )
 
     def _split_affiliation(self, text: str) -> tuple[str, str, str]:
         # Keep the institutional hierarchy together. Earlier code treated

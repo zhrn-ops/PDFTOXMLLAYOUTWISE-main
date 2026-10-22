@@ -259,6 +259,8 @@ class AuthorLinker:
                 given = given or parsed_given
                 initials = initials or parsed_initials
                 surname = surname or parsed_surname
+            if initials and given and self._is_initials_token(given):
+                given = ""
             references = item.get("affiliations") or item.get("affiliation_ids") or []
             if isinstance(references, str):
                 references = [references]
@@ -1237,7 +1239,19 @@ class AuthorLinker:
         parts = [part for part in full_name.split() if part]
         if not parts:
             return "", "", ""
+        # Some journals print surname first, followed by initials without a
+        # comma (e.g. "Sheu J-Y"). Recognize that shape before the generic
+        # given-name-first split so initials are not copied into given-name.
+        if len(parts) == 2 and re.fullmatch(r"[A-Z][A-Za-z'\u2019\-\u00C0-\u017F]+", parts[0]) and re.fullmatch(
+            r"(?:[A-Z](?:\.|-))+(?:[A-Z])?\.?", parts[1]
+        ):
+            initials = parts[1].replace("-", "").rstrip(".") + "."
+            return "", initials, parts[0]
         if len(parts) == 1:
+            # A lone initial token (e.g. "J.-Y.") is not also a given name.
+            if re.fullmatch(r"(?:[A-Z](?:\.|-))+(?:[A-Z])?\.?", parts[0]):
+                token = parts[0].replace("-", "")
+                return "", token if token.endswith(".") else f"{token}.", ""
             return parts[0], f"{parts[0][0].upper()}.", parts[0]
 
         surname_start = len(parts) - 1
@@ -1247,6 +1261,12 @@ class AuthorLinker:
                 break
         given_parts = parts[:surname_start]
         surname_parts = parts[surname_start:]
+        if given_parts and all(
+            re.fullmatch(r"(?:[A-Z](?:\.|-))+(?:[A-Z])?\.?", part)
+            for part in given_parts
+        ):
+            initials = "".join(part.replace("-", "").rstrip(".") for part in given_parts)
+            return "", f"{initials}.", " ".join(surname_parts)
         initials_parts = []
         for part in given_parts:
             if re.fullmatch(r"(?:[A-Z]\.)+", part):
@@ -1254,6 +1274,14 @@ class AuthorLinker:
             else:
                 initials_parts.append(f"{part[0].upper()}.")
         return " ".join(given_parts), "".join(initials_parts), " ".join(surname_parts)
+
+    @staticmethod
+    def _is_initials_token(value: str) -> bool:
+        tokens = value.split()
+        return bool(tokens) and all(
+            re.fullmatch(r"(?:[A-Z](?:\.|-))+(?:[A-Z])?\.?", token)
+            for token in tokens
+        )
 
     def _is_valid_author_candidate(self, text: str) -> bool:
         """Reject obvious footer noise and non-name text before author serialization."""
