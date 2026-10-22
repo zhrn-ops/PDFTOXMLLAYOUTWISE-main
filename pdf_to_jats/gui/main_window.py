@@ -5455,8 +5455,11 @@ class MainWindow(QMainWindow):
                     return False, "The selected paragraphs do not look like a page continuation."
                 continue
             vertical_gap = max(0.0, second.y - (first.y + first.height))
-            right_column_continuation = second.x > first.x + first.width * 0.75
-            if not right_column_continuation and vertical_gap > max(first.height, second.height) * 0.75:
+            # Reading order is column-major. A paragraph can finish near the
+            # bottom of one column and continue at the top of the next, where
+            # the vertical coordinates alone look like a large gap.
+            column_transition = second.x > first.x + max(first.width, second.width) * 0.35
+            if not column_transition and vertical_gap > max(first.height, second.height) * 0.75:
                 return False, "Selected blocks are too far apart to be treated as one continuation."
             if abs(first.font_size - second.font_size) > 2.5:
                 return False, "Selected blocks have mismatched font sizes."

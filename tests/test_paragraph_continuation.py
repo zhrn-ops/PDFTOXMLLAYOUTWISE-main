@@ -83,3 +83,26 @@ def test_continuation_still_rejects_plain_blocks():
 
     assert not valid
     assert "paragraph units" in reason
+
+
+def test_continuation_allows_end_of_column_to_top_of_next_column():
+    """A normal two-column transition can have a large vertical gap."""
+
+    window = _window()
+    first = _unit("block_001", 0, x=40.0, y=600.0)
+    second = _unit("block_002", 1, x=460.0, y=80.0)
+
+    valid, reason = window._selection_looks_like_paragraph_continuation([first, second])
+
+    assert valid, reason
+
+
+def test_continuation_still_rejects_large_gap_within_column():
+    window = _window()
+    first = _unit("block_001", 0, x=40.0, y=100.0)
+    second = _unit("block_002", 1, x=40.0, y=260.0)
+
+    valid, reason = window._selection_looks_like_paragraph_continuation([first, second])
+
+    assert not valid
+    assert "too far apart" in reason
