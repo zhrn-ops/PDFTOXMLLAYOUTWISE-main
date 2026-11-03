@@ -158,6 +158,7 @@ def test_given_name_is_inferred_when_missing(tmp_path):
     assert given_name.text == "Jane"
 
 
+<<<<<<< HEAD
 def test_given_name_fallback_does_not_expand_initials_or_conflicting_surnames(tmp_path):
     for display_name in ("J. Doe", "Doe J.", "Jane Smith", ""):
         groups = _groups(
@@ -170,6 +171,8 @@ def test_given_name_fallback_does_not_expand_initials_or_conflicting_surnames(tm
         assert author.find(_ce("surname")).text == "Doe"
 
 
+=======
+>>>>>>> d80718b4c1f1312852afe85afc9e672c6363450d
 def test_given_name_only_emits_given_name_without_empty_name_elements(tmp_path):
     groups = _groups(
         tmp_path,
@@ -196,6 +199,7 @@ def test_initials_only_emits_initials_without_empty_name_elements(tmp_path):
     assert author.find(_ce("surname")) is None
 
 
+<<<<<<< HEAD
 def test_given_name_only_handles_compound_names_and_absent_display_name(tmp_path):
     for given_names, display_name in (("Mary Jane", "Mary Jane"), ("Jane", "")):
         groups = _groups(tmp_path, _document(
@@ -234,6 +238,8 @@ def test_given_name_with_full_display_name_still_infers_surname(tmp_path):
     assert author.find(_ce("surname")).text == "Doe"
 
 
+=======
+>>>>>>> d80718b4c1f1312852afe85afc9e672c6363450d
 def test_pdf_initials_only_author_omits_given_name_element(tmp_path):
     linked = AuthorLinker().link_from_texts(["Sheu J-Y1"], [])
     groups = _groups(tmp_path, _document(linked.authors, linked.affiliations))

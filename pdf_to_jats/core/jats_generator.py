@@ -175,6 +175,7 @@ class JATSGenerator:
                     initials = initials or parsed_initials
                     given_names = given_names or parsed_given_names
                     surname = surname or parsed_surname
+<<<<<<< HEAD
                 elif not given_names and surname and author.display_name.strip():
                     # Initials and surname can already be populated while the
                     # full given name is only present in the display name.
@@ -183,10 +184,19 @@ class JATSGenerator:
                     _, parsed_given_names, parsed_surname = self._split_name(author.display_name)
                     if parsed_surname.casefold() == surname.casefold():
                         given_names = self._sanitize_xml_text(parsed_given_names)
+=======
+>>>>>>> d80718b4c1f1312852afe85afc9e672c6363450d
                 if initials and given_names and self._name_token_is_initials(given_names):
                     given_names = ""
                 if initials:
                     etree.SubElement(author_el, self._qname("initials", self.CE_NS)).text = initials
+<<<<<<< HEAD
+=======
+                if given_names:
+                    etree.SubElement(author_el, self._qname("given-name", self.CE_NS)).text = given_names
+                if surname:
+                    etree.SubElement(author_el, self._qname("surname", self.CE_NS)).text = surname
+>>>>>>> d80718b4c1f1312852afe85afc9e672c6363450d
                 if author.degrees.strip():
                     etree.SubElement(author_el, self._qname("degrees", self.CE_NS)).text = self._sanitize_xml_text(author.degrees)
                 if surname:
