@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from pathlib import Path
 import os
 import tempfile
@@ -18,12 +19,8 @@ ANI_CE_NS = "http://www.elsevier.com/xml/ani/common"
 
 
 def normalize_organization(value: str) -> str:
-    """Return an organization name without comma separators or stray spaces.
-
-    Editors often paste values such as ``", Dept. of Internal Medicine "``;
-    the XML should keep ``"Dept. of Internal Medicine"`` instead.
-    """
-    return " ".join(str(value or "").replace(",", "").split())
+    """Normalize organization whitespace while preserving punctuation."""
+    return " ".join(str(value or "").split())
 
 
 @dataclass
@@ -77,6 +74,16 @@ class XmlDocumentSession:
             return "JATS"
         return "Unknown"
 
+    @staticmethod
+    def _local_name(node) -> str:
+        """Local tag name, or '' for comments, PIs and other non-elements.
+
+        lxml gives comment and processing-instruction nodes a callable ``tag``,
+        so ``etree.QName`` raises on them.
+        """
+        tag = getattr(node, 'tag', None)
+        return etree.QName(tag).localname if isinstance(tag, str) else ''
+
     def _find(self, names: tuple[str, ...]):
         # Prefer the profile's canonical metadata location, avoiding unrelated
         # titles/abstracts in references and body sections.
@@ -85,10 +92,10 @@ class XmlDocumentSession:
         for wanted in preferred:
             if wanted in names:
                 for node in self.tree.iter():
-                    if etree.QName(node).localname == wanted:
+                    if self._local_name(node) == wanted:
                         return node
         for node in self.tree.iter():
-            if etree.QName(node).localname in names:
+            if self._local_name(node) in names:
                 return node
         return None
 
@@ -107,7 +114,7 @@ class XmlDocumentSession:
         if node is None:
             return ""
         # Preserve inner formatting; display a readable textual editing view.
-        paragraphs = [" ".join("".join(p.itertext()).split()) for p in node.iter() if etree.QName(p).localname in {"p", "para"}]
+        paragraphs = [" ".join("".join(p.itertext()).split()) for p in node.iter() if self._local_name(p) in {"p", "para"}]
         return "\n\n".join(paragraphs) or " ".join("".join(node.itertext()).split())
 
     def authors(self):
@@ -265,6 +272,56 @@ class XmlDocumentSession:
             return person, [(field, value) for field, value in details if value], affiliations
         return None, [], []
 
+    def set_corresponding_author(self, index: int) -> None:
+        """Set ANI correspondence from the selected author and their group."""
+        authors = self.authors()
+        if self.profile != 'ANI' or index < 0 or index >= len(authors):
+            raise ValueError('Select an ANI author to make corresponding author')
+        author = authors[index]
+        group = author.getparent()
+        if self._local_name(group) != 'author-group':
+            raise ValueError('Select an author in an author group')
+        if not self.author_name(author).strip():
+            raise ValueError('Enter the author name first')
+        parent = group.getparent()
+        existing = [child for child in parent if self._local_name(child) == 'correspondence']
+        if len(existing) > 1:
+            raise ValueError('Multiple correspondence entries exist; edit them in Raw XML')
+        namespace = etree.QName(group).namespace
+        correspondence = etree.Element(f'{{{namespace}}}correspondence')
+        person = etree.SubElement(correspondence, f'{{{namespace}}}person')
+        for field in self._author_name_parts(author):
+            person.append(deepcopy(field))
+        for child in group:
+            if self._local_name(child) == 'affiliation':
+                correspondence.append(deepcopy(child))
+        # Copies must not duplicate XML IDs from the original author/group.
+        keys = {'id', '{http://www.w3.org/XML/1998/namespace}id', 'affiliation-instance-id'}
+        used = {value for node in self.tree.iter() for key, value in node.attrib.items() if key in keys}
+        mapping = {}
+        for node in correspondence.iter():
+            for key, value in list(node.attrib.items()):
+                if key in keys:
+                    number = 1
+                    while f'{value}_corr{number}' in used:
+                        number += 1
+                    replacement = f'{value}_corr{number}'
+                    used.add(replacement)
+                    mapping[value] = replacement
+                    node.set(key, replacement)
+        for node in correspondence.iter():
+            if node.get('rid'):
+                node.set('rid', ' '.join(mapping.get(ref, ref) for ref in node.get('rid').split()))
+        if existing:
+            correspondence.attrib.update(existing[0].attrib)
+            correspondence.tail = existing[0].tail
+            parent.replace(existing[0], correspondence)
+        else:
+            groups = [child for child in parent if self._local_name(child) == 'author-group']
+            parent.insert(parent.index(groups[-1]) + 1, correspondence)
+        self.dirty = True
+        self.validation = []
+
     def _person_affiliations(self, person):
         """Affiliations of the author group matching a correspondence person."""
 
@@ -325,8 +382,7 @@ class XmlDocumentSession:
         organization keys must describe one contiguous ordered list.
         """
         old = self.affiliation_form(node)
-        # Organization names are stored without commas, so normalize whatever
-        # the editor sent before deciding whether the form actually changed.
+        # Normalize organization whitespace before comparing form values.
         values = {
             key: normalize_organization(value) if key.partition(":")[0] == "organization" else value
             for key, value in values.items()
@@ -358,6 +414,8 @@ class XmlDocumentSession:
             node = etree.SubElement(node, f'{{{ns}}}affiliation' if ns else 'affiliation')
         # Anything the form no longer lists at the end of the organization
         # sequence was removed by the user.
+        child_spacing = node.text
+        closing_spacing = node[-1].tail if len(node) else None
         ns = etree.QName(node).namespace
         qname = f'{{{ns}}}organization' if ns else 'organization'
         organizations = node.findall(qname)
@@ -393,6 +451,16 @@ class XmlDocumentSession:
                 child.text = value
             if iso_key in values and values[iso_key] != old.get(iso_key):
                 child.set('iso-code', values[iso_key])
+        # lxml does not pretty-print newly inserted siblings when the parent
+        # already contains indentation text. Restore only this container's
+        # whitespace, leaving source text and nested inline markup untouched.
+        if (child_spacing and '\n' in child_spacing and not child_spacing.strip()
+                and closing_spacing and '\n' in closing_spacing and not closing_spacing.strip()
+                and all(not (child.tail or '').strip() for child in node)):
+            for child in node:
+                child.tail = child_spacing
+            if len(node):
+                node[-1].tail = closing_spacing
         self.dirty = True
         self.validation = []
         return True
@@ -427,12 +495,12 @@ class XmlDocumentSession:
         if node is None:
             raise ValueError("No editable field found")
         allowed = {"p", "para", "abstract", "abstracts", "sup", "inf", "sub"}
-        if any(etree.QName(child).localname not in allowed for child in node.iter() if child is not node):
+        if any(self._local_name(child) not in allowed for child in node.iter() if child is not node):
             raise ValueError("This field contains formatting that cannot safely be changed here")
         text, _ = self._text_and_script_runs(node)
         if not 0 <= start < end <= len(text):
             raise ValueError("Select some text first")
-        paragraphs = [child for child in node.iter() if child is not node and etree.QName(child).localname in {"p", "para"}]
+        paragraphs = [child for child in node.iter() if child is not node and self._local_name(child) in {"p", "para"}]
         offset = 0
         for target in paragraphs or [node]:
             value, runs = self._text_and_script_runs(target)
@@ -466,7 +534,7 @@ class XmlDocumentSession:
             raise ValueError("This XML profile has no safely mapped abstract element")
         # Replace only content for the simple single-text abstract representation.
         allowed = {"p", "para", "abstract", "abstracts", "sup", "sub", "inf"}
-        if any(etree.QName(child).localname not in allowed for child in node.iter() if child is not node):
+        if any(self._local_name(child) not in allowed for child in node.iter() if child is not node):
             raise ValueError("Formatted abstract cannot be safely replaced in this document")
         old_text, old_runs = self._text_and_script_runs(node)
         mapped_runs = preserve_matching_runs(old_text, value, old_runs)
@@ -474,7 +542,7 @@ class XmlDocumentSession:
             self._write_scripted_text(node, value, mapped_runs)
         else:
             paragraph_node = next(
-                (child for child in node if etree.QName(child).localname in {"p", "para"}),
+                (child for child in node if self._local_name(child) in {"p", "para"}),
                 None,
             )
             paragraph_tag = paragraph_node.tag if paragraph_node is not None else f"{{{ANI_CE_NS}}}para"
@@ -520,7 +588,7 @@ class XmlDocumentSession:
             def walk(current, inherited_kind=None, inherited_qname=None):
                 append(current.text, inherited_kind, inherited_qname)
                 for child in current:
-                    local = etree.QName(child).localname
+                    local = self._local_name(child)
                     if local == "sup":
                         child_kind = "sup"
                     elif local in {"sub", "inf"}:
@@ -536,7 +604,7 @@ class XmlDocumentSession:
 
         paragraph_nodes = [
             child for child in node.iter()
-            if child is not node and etree.QName(child).localname in {"p", "para"}
+            if child is not node and self._local_name(child) in {"p", "para"}
         ]
         if paragraph_nodes:
             parts = []
@@ -727,7 +795,43 @@ class XmlDocumentSession:
             self.validation = []
         return changed
 
-    def add_author(self, name: str) -> None:
+    def add_author_group(self):
+        """Append an editable ANI group, including its first blank author."""
+        if self.profile != 'ANI':
+            raise ValueError('Author groups are supported for ANI XML only')
+        groups = [node for node in self.tree.iter() if self._local_name(node) == 'author-group']
+        parent = groups[-1].getparent() if groups else self._find(('head',))
+        if parent is None:
+            raise ValueError('No ANI head exists for a new author group')
+        namespace = etree.QName(parent).namespace
+        group = etree.Element(f'{{{namespace}}}author-group')
+        seqs = [int(node.get('seq')) for node in groups if (node.get('seq') or '').isdigit()]
+        group.set('seq', str(max(seqs, default=0) + 1))
+        author = etree.SubElement(group, f'{{{namespace}}}author', seq='1')
+        etree.SubElement(author, f'{{{ANI_CE_NS}}}surname')
+        if groups:
+            parent.insert(parent.index(groups[-1]) + 1, group)
+        else:
+            title = next((child for child in parent if self._local_name(child) == 'citation-title'), None)
+            parent.insert(parent.index(title) + 1 if title is not None else 0, group)
+        self.dirty = True
+        self.validation = []
+        return group
+
+    def add_author(self, name: str, group=None) -> None:
+        if self.profile == 'ANI':
+            if group is None or not any(container is group for _, _, _, container in self.affiliation_groups()) or self._local_name(group) != 'author-group':
+                raise ValueError('Select an author group to add an author')
+            namespace = etree.QName(group).namespace
+            author = etree.Element(f'{{{namespace}}}author')
+            authors = [child for child in group if self._local_name(child) == 'author']
+            seqs = [int(node.get('seq')) for node in authors if (node.get('seq') or '').isdigit()]
+            author.set('seq', str(max(seqs, default=0) + 1))
+            etree.SubElement(author, f'{{{ANI_CE_NS}}}surname').text = name
+            group.insert(group.index(authors[-1]) + 1 if authors else 0, author)
+            self.dirty = True
+            self.validation = []
+            return
         if self.profile != "JATS":
             raise ValueError("Adding authors is supported for JATS XML only")
         group = self._find(("contrib-group",))
@@ -736,6 +840,63 @@ class XmlDocumentSession:
         contrib = etree.SubElement(group, f"{{{etree.QName(group).namespace}}}contrib", attrib={"contrib-type": "author"})
         etree.SubElement(contrib, f"{{{etree.QName(group).namespace}}}name")
         etree.SubElement(contrib[0], f"{{{etree.QName(group).namespace}}}surname").text = name
+        self.dirty = True
+        self.validation = []
+
+    def transfer_author(self, index: int, destination, *, copy: bool = False):
+        """Copy or move a complete author into another ANI group."""
+        authors = self.authors()
+        if index < 0 or index >= len(authors):
+            raise ValueError('Select an author to copy or move')
+        author = authors[index]
+        source = author.getparent()
+        groups = [container for _, _, _, container in self.affiliation_groups()
+                  if container is not None and self._local_name(container) == 'author-group']
+        if source not in groups or destination not in groups:
+            raise ValueError('Select an author and a destination author group')
+        if source is destination:
+            raise ValueError('Choose a different author group')
+        transferred = deepcopy(author) if copy else author
+        if copy:
+            id_keys = {'id', '{http://www.w3.org/XML/1998/namespace}id'}
+            used = {value for node in self.tree.iter() for key, value in node.attrib.items() if key in id_keys}
+            replacements = {}
+            for node in transferred.iter():
+                for key, value in list(node.attrib.items()):
+                    if key not in id_keys:
+                        continue
+                    suffix = 1
+                    candidate = f'{value}_copy{suffix}'
+                    while candidate in used:
+                        suffix += 1
+                        candidate = f'{value}_copy{suffix}'
+                    used.add(candidate)
+                    replacements[value] = candidate
+                    node.set(key, candidate)
+            for node in transferred.iter():
+                if node.get('rid'):
+                    node.set('rid', ' '.join(replacements.get(ref, ref) for ref in node.get('rid').split()))
+        target_authors = [child for child in destination if self._local_name(child) == 'author']
+        sequences = [int(child.get('seq')) for child in target_authors if (child.get('seq') or '').isdigit()]
+        transferred.set('seq', str(max(sequences, default=0) + 1))
+        destination.insert(destination.index(target_authors[-1]) + 1 if target_authors else 0, transferred)
+        self.dirty = True
+        self.validation = []
+        return transferred
+
+    def remove_author_group(self, node) -> None:
+        """Remove an ANI group and its contents without leaving dangling links."""
+        if not any(container is node for _, _, _, container in self.affiliation_groups()):
+            raise ValueError("Author groups changed; select the group again")
+        if etree.QName(node).localname != "author-group" or node.getparent() is None:
+            raise ValueError("Select an author group to remove")
+        members = set(node.iter())
+        ids = {value for member in members for key, value in member.attrib.items()
+               if key in {"id", "{http://www.w3.org/XML/1998/namespace}id"}}
+        if ids and any(ids.intersection(ref.get("rid", "").split())
+                       for ref in self.tree.iter() if ref not in members):
+            raise ValueError("This author group has references; remove or resolve them explicitly first")
+        node.getparent().remove(node)
         self.dirty = True
         self.validation = []
 
@@ -791,7 +952,23 @@ class XmlDocumentSession:
             return False, str(exc), entry.line if entry else None, entry.column if entry else None
 
     def xml_text(self) -> str:
-        return etree.tostring(self.tree, encoding=self.encoding, xml_declaration=True, pretty_print=True).decode(self.encoding)
+        tree = deepcopy(self.tree)
+
+        def separate_elements(node):
+            if not isinstance(node.tag, str) or not len(node):
+                return
+            if node.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve':
+                return
+            # Inline text must retain its exact spacing and markup.
+            if (node.text or '').strip() or any((child.tail or '').strip() for child in node):
+                return
+            node.text = '\n'
+            for child in node:
+                separate_elements(child)
+                child.tail = '\n'
+
+        separate_elements(tree.getroot())
+        return etree.tostring(tree, encoding=self.encoding, xml_declaration=True).decode(self.encoding)
 
     def validate(self) -> list[Issue]:
         if not self.raw_valid:
@@ -837,7 +1014,7 @@ class XmlDocumentSession:
             raise ValueError("Fix the raw XML parse error before exporting a copy")
         if any(issue.severity == "error" for issue in self.validation):
             raise ValueError("Fix XML validation errors before exporting a copy")
-        data = etree.tostring(self.tree, encoding=self.encoding, xml_declaration=True, pretty_print=True)
+        data = self.xml_text().encode(self.encoding)
         destination.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
         try:

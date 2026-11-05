@@ -1,4 +1,36 @@
-"""Centralized visual tokens and application-wide dark theme."""
+"""Application themes, retaining the original dark palette."""
+
+import re
+
+
+LIGHT_COLORS = {
+    '#0b1220': '#f4f6fa', '#0e1828': '#eaf0f7', '#1c2940': '#ffffff',
+    '#28374d': '#c7d2e0', '#e8eef7': '#172b45', '#a6b3c6': '#52657d',
+    '#20324b': '#e0eafa', '#4d6684': '#8ca3bf', '#10243a': '#eaf1fa',
+    '#121c2a': '#edf0f4', '#718096': '#64748b', '#263448': '#cbd5e1',
+    '#202e43': '#c7d2e0', '#8295b0': '#52657d', '#131d2e': '#ffffff',
+    '#78aaff': '#245bb5', '#203b60': '#dbeafe', '#dbeafe': '#173d72',
+    '#34465f': '#b2bfd0', '#516886': '#8194ad', '#102137': '#e3ebf5',
+    '#101d2c': '#f4f6fa', '#e7f0ff': '#172b45', '#dce9fa': '#243b55',
+    '#14283c': '#ffffff', '#294663': '#c7d2e0', '#1b3a59': '#e0eafa',
+    '#091421': '#ffffff', '#cfe0f2': '#334b65', '#f4f8ff': '#172b45',
+    '#a9c8ec': '#385777', '#a8b5c7': '#52657d', '#9a9a9a': '#52657d',
+    '#202020': '#ffffff', '#f2f2f2': '#172b45', '#606060': '#c7d2e0',
+    '#ffffff': '#172b45', '#2b2b2b': '#f4f6fa', '#183653': '#dbeafe',
+    '#173d24': '#dcfce7', '#232323': '#edf0f4', '#8f8f8f': '#64748b',
+    '#2a2a2a': '#e2e8f0', '#c0c0c0': '#475569', '#241d1d': '#fff1f2',
+    '#7d6b6b': '#855360', '#2d2020': '#ffe4e6', '#9a8a8a': '#854d5d',
+    '#bdbdbd': '#52657d', '#fbbf24': '#925900', '#34d399': '#137a50',
+    '#f87171': '#b42332',
+}
+
+
+def themed_style(style: str, theme: str) -> str:
+    """Translate known UI colors without touching document content."""
+    if theme != 'light':
+        return style
+    return re.sub(r'#[0-9a-fA-F]{6}\b',
+                  lambda match: LIGHT_COLORS.get(match[0].lower(), match[0]), style)
 
 COLORS = {
     "background": "#0B1220",

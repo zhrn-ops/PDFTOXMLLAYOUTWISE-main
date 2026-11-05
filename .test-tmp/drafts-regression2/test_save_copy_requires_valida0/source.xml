@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<article xmlns="urn:j"><front><article-meta>
-<title-group><article-title>Old title</article-title></title-group>
-<contrib-group><contrib contrib-type="author"><name><surname>Smith</surname></name></contrib></contrib-group>
-<abstract><p>Abstract text</p></abstract><kwd-group><kwd>one</kwd></kwd-group>
-<aff id="a1">University</aff><custom flag="keep">Unknown</custom>
-</article-meta></front></article>

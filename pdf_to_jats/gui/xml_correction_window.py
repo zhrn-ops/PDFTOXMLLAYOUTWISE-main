@@ -7,9 +7,9 @@ from pathlib import Path
 import fitz
 from lxml import etree
 from PySide6.QtCore import Qt, QEvent
-from PySide6.QtGui import QColor, QTextCursor, QKeySequence
+from PySide6.QtGui import QColor, QTextCursor, QKeySequence, QTextDocument, QFont
 from PySide6.QtWidgets import (
-    QWidget, QFileDialog, QFormLayout, QHBoxLayout, QDialog, QDialogButtonBox,
+    QWidget, QFileDialog, QFormLayout, QHBoxLayout, QDialog, QDialogButtonBox, QStyledItemDelegate,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QComboBox, QPlainTextEdit, QSplitter, QTabWidget, QVBoxLayout, QWidget, QMenu, QTextEdit, QScrollArea,
 )
@@ -17,9 +17,90 @@ from PySide6.QtWidgets import (
 from pdf_to_jats.core.xml_correction import XmlDocumentSession, normalize_organization
 from pdf_to_jats.core.inline_script_detector import preserve_matching_runs
 from pdf_to_jats.gui.pdf_viewer import PDFViewer
+from pdf_to_jats.gui.xml_code_editor import XmlCodeEditor
 from pdf_to_jats.gui.article_drafts import ArticleDrafts
+from pdf_to_jats.gui.styles import themed_style
 
 SCRIPT_COLORS = {"sup": "#78AAFF", "sub": "#FBBF24"}
+SCRIPT_BACKGROUNDS = {
+    'dark': {'sup': '#183653', 'sub': '#513a10'},
+    'light': {'sup': '#cfe4ff', 'sub': '#ffe39a'},
+}
+
+
+class _AuthorRowDelegate(QStyledItemDelegate):
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if index.data(Qt.UserRole) is not None:
+            option.text = ''  # The row widget renders author names.
+
+
+def _tag_end(text: str, start: int) -> int:
+    """Return the index of a tag's closing '>', ignoring quoted '>'."""
+    quote = ''
+    for position in range(start + 1, len(text)):
+        character = text[position]
+        if quote:
+            if character == quote:
+                quote = ''
+        elif character in '"\'':
+            quote = character
+        elif character == '>':
+            return position
+    return -1
+
+
+def _element_spans(text: str) -> list[tuple[int, int]]:
+    """Character span of every element in ``text``, in document order.
+
+    Comments, CDATA, processing instructions and the doctype are skipped so the
+    result lines up with ``ElementTree.iter()`` filtered to real elements.
+    """
+    spans: list[tuple[int, int]] = []
+    open_elements: list[int] = []
+    position = 0
+    while position < len(text):
+        start = text.find('<', position)
+        if start < 0:
+            break
+        if text.startswith('<!--', start):
+            end = text.find('-->', start)
+            position = len(text) if end < 0 else end + 3
+            continue
+        if text.startswith('<![CDATA[', start):
+            end = text.find(']]>', start)
+            position = len(text) if end < 0 else end + 3
+            continue
+        if text.startswith('<?', start):
+            end = text.find('?>', start)
+            position = len(text) if end < 0 else end + 2
+            continue
+        if text.startswith('<!', start):
+            end = text.find('>', start)
+            position = len(text) if end < 0 else end + 1
+            continue
+        end = _tag_end(text, start)
+        if end < 0:
+            break
+        if text.startswith('</', start):
+            if open_elements:
+                index = open_elements.pop()
+                spans[index] = (spans[index][0], end + 1)
+        else:
+            spans.append((start, end + 1))
+            if text[end - 1] != '/':
+                open_elements.append(len(spans) - 1)
+        position = end + 1
+    return spans
+
+
+def _script_legend_text(theme='dark') -> str:
+    return ' &nbsp;·&nbsp; '.join(
+        f'<span style="color:{themed_style(SCRIPT_COLORS[kind], theme)};'
+        f'background-color:{SCRIPT_BACKGROUNDS[theme][kind]};font-weight:700">'
+        f' {label} </span>'
+        for kind, label in (('sup', 'Superscript'), ('sub', 'Subscript'))
+    )
 
 
 def _script_legend() -> QLabel:
@@ -28,7 +109,9 @@ def _script_legend() -> QLabel:
         ' &nbsp;·&nbsp; '
         f'<span style="color:{SCRIPT_COLORS["sub"]}">Subscript</span>'
     )
+    label.setText(_script_legend_text())
     label.setToolTip("Select text, then use the toolbar or right-click to change its formatting.")
+    label.setProperty('darkLegend', label.text())
     return label
 
 
@@ -40,6 +123,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self.setStyleSheet("QWidget#xmlCorrectionWorkspace { background:#101d2c; color:#e7f0ff; } QLabel { color:#dce9fa; } QPushButton { background:#14283c; color:#e7f0ff; border:1px solid #294663; border-radius:5px; padding:7px 12px; } QPushButton:hover { background:#1b3a59; } QLineEdit,QPlainTextEdit,QListWidget { background:#091421; color:#e7f0ff; border:1px solid #294663; border-radius:4px; padding:6px; } QTabWidget::pane { border:1px solid #294663; } QTabBar::tab { background:#14283c; color:#cfe0f2; padding:8px 14px; } QTabBar::tab:selected { background:#0874d1; }")
         self.session: XmlDocumentSession | None = None
         self._syncing = False
+        self._xml_text_baseline = ''
         self._init_drafts()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -90,11 +174,17 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self.tabs.addTab(title_page, "Title")
         self.author_list = QListWidget()
         self.author_list.itemDoubleClicked.connect(lambda _item: self.edit_author())
+        self.author_list.setItemDelegate(_AuthorRowDelegate(self.author_list))
         author_buttons = QHBoxLayout()
         edit_author = QPushButton("Edit selected"); edit_author.clicked.connect(self.edit_author)
-        add_author = QPushButton("Add"); add_author.clicked.connect(self.add_author)
+        add_author = QPushButton("Add author"); add_author.clicked.connect(self.add_author)
+        add_group = QPushButton("Add author group")
+        add_group.setObjectName('add_author_group')
+        add_group.clicked.connect(self.add_author_group)
         remove_author = QPushButton("Remove"); remove_author.clicked.connect(self.remove_author)
+        remove_author.setToolTip("Remove the selected author or author group")
         author_buttons.addWidget(edit_author); author_buttons.addWidget(add_author); author_buttons.addWidget(remove_author)
+        author_buttons.addWidget(add_group)
         self.abstract_edit = QPlainTextEdit(); self.abstract_edit.textChanged.connect(self._abstract_changed)
         self.keyword_list = QListWidget()
         kw_buttons = QHBoxLayout(); kw_edit = QPushButton("Edit selected"); kw_edit.clicked.connect(self.edit_keyword); kw_add = QPushButton("Add"); kw_add.clicked.connect(self.add_keyword); kw_remove = QPushButton("Remove"); kw_remove.clicked.connect(self.remove_keyword)
@@ -107,6 +197,24 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         author_layout.addLayout(author_buttons)
         self.tabs.addTab(authors_page, "Authors && Affiliations")
         abstract_page = QWidget(); abstract_layout = QVBoxLayout(abstract_page)
+        find_row = QHBoxLayout()
+        self.abstract_find = QLineEdit()
+        self.abstract_find.setObjectName('abstract_find')
+        self.abstract_find.setPlaceholderText('Find in abstract (Ctrl+F)')
+        self.abstract_find.setClearButtonEnabled(True)
+        self.abstract_find.setToolTip('Case-insensitive search. Press Enter for the next match.')
+        find_row.addWidget(self.abstract_find, 1)
+        self.abstract_find_previous = QPushButton('Previous')
+        self.abstract_find_next = QPushButton('Next')
+        find_row.addWidget(self.abstract_find_previous)
+        find_row.addWidget(self.abstract_find_next)
+        self.abstract_find_status = QLabel()
+        find_row.addWidget(self.abstract_find_status)
+        self.abstract_find.textChanged.connect(lambda: self._find_abstract(restart=True))
+        self.abstract_find.returnPressed.connect(self._find_abstract)
+        self.abstract_find_previous.clicked.connect(lambda: self._find_abstract(backward=True))
+        self.abstract_find_next.clicked.connect(lambda: self._find_abstract())
+        abstract_layout.addLayout(find_row)
         abstract_layout.addWidget(self._formatting_toolbar(self.abstract_edit, "abstract"))
         abstract_layout.addWidget(self.abstract_edit)
         abstract_layout.addWidget(_script_legend())
@@ -141,11 +249,11 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         right = QWidget(); right_layout = QVBoxLayout(right); right_layout.setContentsMargins(0,0,0,0)
         right_layout.addWidget(QLabel("XML Preview / Raw XML"))
         self.mode_tabs = QTabWidget()
-        self.preview = QPlainTextEdit(); self.preview.setLineWrapMode(QPlainTextEdit.WidgetWidth); self.preview.setStyleSheet("font-family:Consolas,monospace")
-        self.raw = QPlainTextEdit(); self.raw.setLineWrapMode(QPlainTextEdit.WidgetWidth); self.raw.setStyleSheet("font-family:Consolas,monospace"); self.raw.textChanged.connect(self._raw_changed)
+        self.preview = XmlCodeEditor()
+        self.raw = XmlCodeEditor(); self.raw.textChanged.connect(self._raw_changed)
         self.preview.textChanged.connect(self._preview_changed)
         self.mode_tabs.addTab(self.preview, "Preview"); self.mode_tabs.addTab(self.raw, "Raw XML")
-        self.pdf_preview = PDFViewer()
+        self.pdf_preview = PDFViewer(text_selectable=True)
         self.pdf_preview.setMinimumSize(0, 0)
         self.pdf_preview_path: Path | None = None
         self._pdf_text_document = None
@@ -174,12 +282,19 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         right_layout.addWidget(self.mode_tabs)
         splitter.addWidget(self.tabs); splitter.addWidget(right); splitter.setSizes([560, 700]); splitter.setChildrenCollapsible(False)
         root.addWidget(splitter, 1)
+        # Clicking a component follows it into both XML panes. Typing must not
+        # drag the XML view around, so the reveal is click-driven, not caret-driven.
+        self.author_list.currentItemChanged.connect(lambda current, _previous: self._reveal_list_node(current))
+        self.keyword_list.currentRowChanged.connect(self._reveal_keyword)
+        self.correspondence_affiliations.currentRowChanged.connect(
+            lambda row: self._reveal_list_node(self.correspondence_affiliations.item(row)))
         for editor, field in ((self.title_edit, "title"), (self.abstract_edit, "abstract")):
             editor.setContextMenuPolicy(Qt.CustomContextMenu)
             editor.customContextMenuRequested.connect(
                 lambda point, e=editor, f=field: self._field_menu(e, f, point)
             )
             editor.installEventFilter(self)
+            editor.viewport().installEventFilter(self)
         footer = QHBoxLayout(); self.status = QLabel("Ready"); footer.addWidget(self.status,1); footer.addWidget(QLabel("Save drafts anytime; validate before export.")); save = QPushButton("Validate && Export"); save.clicked.connect(self.save_copy); footer.addWidget(save); root.addLayout(footer)
         outer.addWidget(content, 1)
 
@@ -253,7 +368,17 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         if previous:
             if self._regeneration_content(previous.get('generated_xml')) == self._regeneration_content(text):
                 return self.activate_draft(key)
-            if not self.review_regeneration(previous['xml'], text):
+            baseline = previous.get('generated_xml')
+            if baseline is not None:
+                # Compare using the editor's serialization: opening compact
+                # XML adds indentation but is not a manual correction.
+                baseline = XmlDocumentSession.from_text(baseline, label_path).xml_text()
+            corrected = (
+                self._regeneration_content(previous['xml'])
+                != self._regeneration_content(baseline)
+                or previous.get('raw', previous['xml']) != previous['xml']
+            )
+            if corrected and not self.review_regeneration(previous['xml'], text):
                 previous['pending_generated'] = text
                 return self.activate_draft(key)
             revision = 1
@@ -281,7 +406,11 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self._record_history()
         s = self.session; self._syncing = True
         self._refresh_fields(preserve_abstract=preserve_abstract)
-        text = s.xml_text(); self.preview.setPlainText(text); self.raw.setPlainText(text)
+        text = s.xml_text()
+        # A redraw for the same document must not throw away the reader's place.
+        self._set_xml_pane_text(text, reset=getattr(self, '_pane_session', None) is not s)
+        self._pane_session = s
+        self._xml_text_baseline = text
         source_label = "FILE" if s.source_path is not None else "DRAFT IN MEMORY"
         validation_label = "Needs review" if s.validation else "Not validated"
         self.summary.setText(f"{source_label}  {s.path.name}  ·  {s.path}\nVALIDATION  {validation_label}     AUTHORS  {len(s.authors())}     AFFILIATIONS  {len(s.affiliations())}     PROFILE  {s.profile}")
@@ -290,6 +419,16 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self._syncing = False
 
     def eventFilter(self, watched, event):
+        for editor, field in ((self.title_edit, "title"), (self.abstract_edit, "abstract")):
+            if watched is editor.viewport() and event.type() == QEvent.MouseButtonPress:
+                self._reveal_field_node(field)
+        if watched is self.abstract_edit and event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
+            if event.matches(QKeySequence.StandardKey.Find):
+                event.accept()
+                if event.type() == QEvent.KeyPress:
+                    self.abstract_find.setFocus()
+                    self.abstract_find.selectAll()
+                return True
         if watched in (self.title_edit, self.abstract_edit) and event.type() in (
             QEvent.ShortcutOverride, QEvent.KeyPress
         ):
@@ -304,6 +443,31 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                     self._undo_field() if undo else self._redo_field()
                 return True
         return super().eventFilter(watched, event)
+
+    def _find_abstract(self, *, backward=False, restart=False):
+        query = self.abstract_find.text()
+        if not query:
+            self.abstract_find_status.clear()
+            cursor = self.abstract_edit.textCursor()
+            cursor.clearSelection()
+            self.abstract_edit.setTextCursor(cursor)
+            return
+        document = self.abstract_edit.document()
+        cursor = self.abstract_edit.textCursor()
+        position = 0 if restart else (cursor.selectionStart() if backward else cursor.selectionEnd())
+        flags = QTextDocument.FindBackward if backward else QTextDocument.FindFlags()
+        found = document.find(query, position, flags)
+        wrapped = found.isNull()
+        if wrapped:
+            found = document.find(query, document.characterCount() - 1 if backward else 0, flags)
+        if found.isNull():
+            self.abstract_find_status.setText('No matches')
+            cursor.clearSelection()
+            self.abstract_edit.setTextCursor(cursor)
+        else:
+            self.abstract_edit.setTextCursor(found)
+            self.abstract_edit.ensureCursorVisible()
+            self.abstract_find_status.setText('Wrapped' if wrapped else 'Match found')
 
     def _record_history(self):
         text = self.session.xml_text()
@@ -422,6 +586,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             is_group = container is not None and etree.QName(container).localname == 'author-group'
             heading = QListWidgetItem(f"Group {number}: {label}" if is_group else label)
             heading.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            if is_group:
+                heading.setData(Qt.UserRole + 2, s.tree.getpath(container))
             if len(nodes) == 1:
                 if affiliation_editable(nodes[0]):
                     heading.setData(Qt.UserRole + 1, s.tree.getpath(nodes[0]))
@@ -448,6 +614,47 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 item = QListWidgetItem("    " + name)
                 item.setData(Qt.UserRole, index)
                 self.author_list.addItem(item)
+                row_widget = QWidget(self.author_list.viewport())
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(18, 6, 12, 6)
+                row_layout.setSpacing(10)
+                name_label = QLabel(name)
+                name_label.setMinimumWidth(0)
+                name_label.setToolTip(name)
+                name_label.setTextFormat(Qt.PlainText)
+                name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+                row_layout.addWidget(name_label, 1)
+                for label, copy_author in [('Copy', True), ('Move', False), ('Corresponding', None)]:
+                    button = QPushButton(label)
+                    button.setFlat(True)
+                    button.setCursor(Qt.PointingHandCursor)
+                    button.setStyleSheet(
+                        'QPushButton { min-height: 20px; padding: 3px 8px; '
+                        'border: none; border-radius: 4px; background: transparent; }'
+                        'QPushButton:hover { background: rgba(128, 128, 128, 35); }'
+                        'QPushButton:focus { border: 1px solid #78AAFF; }')
+                    if copy_author is None:
+                        button.setObjectName(f'corresponding_author_{index}')
+                        button.setToolTip(f'Make {name} the corresponding author')
+                        button.clicked.connect(lambda _checked=False, entry=item: self.make_corresponding_author(entry))
+                    else:
+                        button.setObjectName(f'{"copy" if copy_author else "move"}_author_{index}')
+                        button.setToolTip(f'{label} {name} to another author group')
+                        button.clicked.connect(
+                            lambda _checked=False, entry=item, copy=copy_author:
+                            self._transfer_author_row(entry, copy=copy))
+                    row_layout.addWidget(button)
+                # Retain the item's text for searching and accessibility, while
+                # the row widget displays the name with actions aligned right.
+                self.author_list.setItemWidget(item, row_widget)
+                # Measure after parenting and polishing so the active theme's
+                # button padding and font metrics are included in row height.
+                row_widget.ensurePolished()
+                for button in row_widget.findChildren(QPushButton):
+                    button.ensurePolished()
+                row_layout.invalidate()
+                row_layout.activate()
+                item.setSizeHint(row_widget.sizeHint())
         self.keyword_list.clear()
         for node in s.keywords(): self.keyword_list.addItem(" ".join("".join(node.itertext()).split()))
         self._fill_correspondence()
@@ -488,8 +695,84 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 item.setToolTip("This affiliation has no editable fields here; use Raw XML")
             self.correspondence_affiliations.addItem(item)
 
+    def _reveal_field_node(self, field: str) -> None:
+        """Follow the caret in a component editor to its element in the XML."""
+        if self._syncing or not self.session:
+            return
+        self._reveal_node(
+            self.session.title_node() if field == 'title' else self.session.abstract_node()
+        )
+
+    def _reveal_keyword(self, row: int) -> None:
+        if self._syncing or not self.session or row < 0:
+            return
+        nodes = self.session.keywords()
+        if row < len(nodes):
+            self._reveal_node(nodes[row])
+
+    def _reveal_list_node(self, item) -> None:
+        """Reveal the element a list row stands for (author, group, affiliation)."""
+        if self._syncing or not self.session or item is None:
+            return
+        path = item.data(Qt.UserRole + 2) or item.data(Qt.UserRole + 1)
+        if path:
+            nodes = self.session.tree.xpath(
+                path,
+                namespaces={key: value for key, value in self.session.tree.getroot().nsmap.items() if key},
+            )
+            if nodes:
+                self._reveal_node(nodes[0])
+            return
+        index = item.data(Qt.UserRole)
+        authors = self.session.authors()
+        if index is not None and 0 <= index < len(authors):
+            self._reveal_node(authors[index])
+
+    def _reveal_node(self, node) -> None:
+        """Scroll both XML panes to ``node`` and band its opening tag."""
+        span = self._xml_span(node)
+        if span is None:
+            return
+        text = self.preview.toPlainText()
+        # Qt positions count UTF-16 units, unlike Python string indices.
+        start = len(text[:span[0]].encode('utf-16-le')) // 2
+        end = len(text[:span[1]].encode('utf-16-le')) // 2
+        for editor in (self.preview, self.raw):
+            editor.reveal_span(start, end)
+
+    def _xml_span(self, node) -> tuple[int, int] | None:
+        """Map a tree node to its character span in the XML the panes show."""
+        if node is None or self.session is None or not self.session.raw_valid:
+            return None
+        text = self.preview.toPlainText()
+        if text != self.raw.toPlainText():
+            return None
+        elements = [element for element in self.session.tree.iter() if isinstance(element.tag, str)]
+        index = next((position for position, element in enumerate(elements) if element is node), None)
+        spans = _element_spans(text)
+        # Unequal counts mean the panes and the model diverged (mid-edit XML).
+        if index is None or len(spans) != len(elements):
+            return None
+        return spans[index]
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = theme
+        original = self.property('darkStyle') or self.styleSheet()
+        self.setProperty('darkStyle', original)
+        self.setStyleSheet(themed_style(original, theme) +
+                           (' QTabBar::tab:selected { color:white; }' if theme == 'light' else ''))
+        for editor in (self.preview, self.raw):
+            editor.set_theme(theme)
+        for label in self.findChildren(QLabel):
+            original = label.property('darkLegend')
+            if original:
+                label.setText(_script_legend_text(theme))
+        if self.session is not None:
+            self._highlight_scripts(self.title_edit, self.session.title_node())
+            self._highlight_scripts(self.abstract_edit, self.session.abstract_node())
+
     def _highlight_scripts(self, editor: QPlainTextEdit, node) -> None:
-        """Tint script spans without modifying text, XML, or the undo history."""
+        """Highlight script spans without modifying text, XML, or undo history."""
         selections = []
         if self.session is not None and node is not None:
             source, runs = self.session._text_and_script_runs(node)
@@ -506,7 +789,10 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 selection.cursor.setPosition(
                     len(text[:end].encode("utf-16-le")) // 2, QTextCursor.KeepAnchor
                 )
-                selection.format.setForeground(QColor(color))
+                selection.format.setForeground(QColor(themed_style(color, getattr(self, '_theme', 'dark'))))
+                selection.format.setBackground(QColor(
+                    SCRIPT_BACKGROUNDS[getattr(self, '_theme', 'dark')][run['type']]))
+                selection.format.setFontWeight(QFont.Bold)
                 selections.append(selection)
         editor.setExtraSelections(selections)
 
@@ -534,6 +820,31 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             # newline is part of the user's next word/paragraph in progress.
             self._refresh(preserve_abstract=True)
 
+    def _set_xml_pane_text(self, text: str, *, reset: bool = False) -> None:
+        """Replace both pane texts, keeping scroll position and caret by default."""
+        for editor in (self.preview, self.raw):
+            position = 0 if reset else editor.textCursor().position()
+            vertical = 0 if reset else editor.verticalScrollBar().value()
+            horizontal = 0 if reset else editor.horizontalScrollBar().value()
+            editor.setPlainText(text)
+            cursor = editor.textCursor()
+            cursor.setPosition(min(position, max(0, len(text))))
+            editor.setTextCursor(cursor)
+            editor.verticalScrollBar().setValue(
+                min(vertical, editor.verticalScrollBar().maximum()))
+            editor.horizontalScrollBar().setValue(
+                min(horizontal, editor.horizontalScrollBar().maximum()))
+
+    def _restore_xml_text(self, text: str) -> None:
+        """Put both panes back on the last accepted XML without touching the model."""
+        self._syncing = True
+        try:
+            for editor in (self.preview, self.raw):
+                if editor.toPlainText() != text:
+                    editor.setPlainText(text)
+        finally:
+            self._syncing = False
+
     def _raw_changed(self) -> None:
         self._xml_editor_changed(self.raw, self.preview)
 
@@ -543,6 +854,17 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
     def _xml_editor_changed(self, edited: QPlainTextEdit, other: QPlainTextEdit) -> None:
         if self._syncing or not self.session: return
         text = edited.toPlainText()
+        # Comments are not authored from this workspace; a document that ships
+        # with them keeps them, but new ones are refused rather than written.
+        if text.count('<!--') > self._xml_text_baseline.count('<!--'):
+            position = edited.textCursor().position()
+            self._restore_xml_text(self._xml_text_baseline)
+            cursor = edited.textCursor()
+            cursor.setPosition(min(position, len(self._xml_text_baseline)))
+            edited.setTextCursor(cursor)
+            self.status.setText(
+                "XML comments are disabled in this editor; remove the <!-- --> block to continue")
+            return
         # Both tabs edit the same draft, including incomplete XML. Parsing
         # controls model updates and export, not which text the other tab sees.
         self._syncing = True
@@ -551,6 +873,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 other.setPlainText(text)
         finally:
             self._syncing = False
+        self._xml_text_baseline = text
         ok, message, line, column = self.session.commit_raw(text)
         for index in range(self.tabs.count()):
             page = self.tabs.widget(index)
@@ -659,30 +982,18 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         containers: dict[str, QWidget] = {}
 
         def organization_keys() -> list[str]:
-            return [key for key in fields if key.partition(':')[0] == 'organization']
+            return sorted(
+                (key for key in fields if key.partition(':')[0] == 'organization'),
+                key=lambda key: int(key.partition(':')[2] or '1'),
+            )
 
         def organization_label(index: int) -> str:
             return 'Organization' if index == 1 else f'Organization {index}'
-
-        def strip_commas(field: QLineEdit, text: str) -> None:
-            # Organization names carry no comma separators; drop them as the
-            # user types so the field always matches what the XML will store.
-            if ',' not in text:
-                return
-            before = text[:field.cursorPosition()].replace(',', '')
-            field.blockSignals(True)
-            field.setText(text.replace(',', ''))
-            field.setCursorPosition(len(before))
-            field.blockSignals(False)
 
         def add_field(key: str, value: str) -> tuple[str, QWidget]:
             base = key.split(':')[0].split('@')[0]
             field = QLineEdit(normalize_organization(value) if base == 'organization' else value)
             field.setObjectName(f'affiliation_{key}')
-            if base == 'organization':
-                field.textChanged.connect(
-                    lambda text, target=field: strip_commas(target, text)
-                )
             label = 'Country ISO code' if '@iso-code' in key else labels[base]
             if ':' in key:
                 label += ' ' + key.split(':')[1].split('@')[0]
@@ -693,6 +1004,11 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             row_layout = QHBoxLayout(container)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.addWidget(field, 1)
+            split = QPushButton("Split by commas")
+            split.setObjectName(f'affiliation_split_{key}')
+            split.setToolTip("Preview separate organization entries for this field")
+            split.clicked.connect(lambda _checked=False, f=field: split_organization(f))
+            row_layout.addWidget(split)
             remove = QPushButton("Remove")
             remove.setObjectName(f'affiliation_remove_{key}')
             remove.setToolTip("Remove this organization from the affiliation")
@@ -726,6 +1042,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 for button in moved.findChildren(QPushButton):
                     if button.objectName().startswith('affiliation_remove_'):
                         button.setObjectName(f'affiliation_remove_{target}')
+                    elif button.objectName().startswith('affiliation_split_'):
+                        button.setObjectName(f'affiliation_split_{target}')
                 moved_row, _role = form.getWidgetPosition(moved)
                 label_item = form.itemAt(moved_row, QFormLayout.LabelRole)
                 if label_item is not None and label_item.widget() is not None:
@@ -760,6 +1078,33 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 position = 1  # directly after the affiliation instance ID
             form.insertRow(position, label, widget)
             fields[key].setFocus()
+
+        def split_organization(field: QLineEdit) -> None:
+            parts = [part.strip() for part in field.text().split(',') if part.strip()]
+            if len(parts) < 2:
+                QMessageBox.information(dialog, "Split organization",
+                                        "Enter at least two non-empty entries separated by commas.")
+                return
+            keys = organization_keys()
+            index = next(i for i, key in enumerate(keys) if fields[key] is field)
+            preview = '\n'.join(
+                f"{organization_label(index + offset)}: {part}"
+                for offset, part in enumerate(parts, 1)
+            )
+            if QMessageBox.question(
+                dialog, "Split organization",
+                "Replace this organization field with these entries?\n\n" + preview
+                + "\n\nYou can edit each entry before saving the affiliation.",
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel,
+            ) != QMessageBox.Ok:
+                return
+            values = [fields[key].text() for key in keys]
+            values[index:index + 1] = parts
+            for _ in range(len(parts) - 1):
+                add_organization()
+            for key, value in zip(organization_keys(), values):
+                fields[key].setText(value)
+            field.setFocus()
 
         add_organization_button = QPushButton("Add organization")
         add_organization_button.setObjectName('affiliation_add_organization')
@@ -824,15 +1169,114 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         dialog.exec()
         dialog.deleteLater()
 
+    def add_author_group(self) -> None:
+        if not self.session: return
+        try:
+            self._record_history()
+            group = self.session.add_author_group()
+            path = self.session.tree.getpath(group)
+            self._refresh()
+            for row in range(self.author_list.count()):
+                if self.author_list.item(row).data(Qt.UserRole + 2) == path:
+                    self.author_list.setCurrentRow(row)
+                    break
+        except ValueError as exc:
+            QMessageBox.information(self, "Cannot add author group", str(exc))
+
     def add_author(self) -> None:
         if not self.session: return
         value, ok = QInputDialog.getText(self, "Add author", "Author name")
         if ok and value.strip():
-            try: self.session.add_author(value.strip()); self._refresh()
+            try:
+                group = None
+                if self.session.profile == 'ANI':
+                    row = self.author_list.currentRow()
+                    while row >= 0:
+                        path = self.author_list.item(row).data(Qt.UserRole + 2)
+                        if path:
+                            matches = self.session.tree.xpath(path, namespaces={
+                                key: value for key, value in self.session.tree.getroot().nsmap.items() if key})
+                            group = matches[0] if matches else None
+                            break
+                        row -= 1
+                self._record_history()
+                self.session.add_author(value.strip(), group=group)
+                self._refresh()
             except ValueError as exc: QMessageBox.information(self, "Cannot add author", str(exc))
+
+    def make_corresponding_author(self, item) -> None:
+        if not self.session: return
+        index = item.data(Qt.UserRole)
+        if index is None: return
+        try:
+            self._record_history()
+            self.session.set_corresponding_author(index)
+            self._refresh()
+            for tab in range(self.tabs.count()):
+                if self.tabs.tabText(tab) == 'Corresponding Author':
+                    self.tabs.setCurrentIndex(tab)
+                    break
+        except ValueError as exc:
+            QMessageBox.information(self, 'Cannot set corresponding author', str(exc))
+
+    def _transfer_author_row(self, item, *, copy: bool) -> None:
+        self.author_list.setCurrentItem(item)
+        self.transfer_author(copy=copy)
+
+    def transfer_author(self, *, copy: bool) -> None:
+        if not self.session: return
+        item = self.author_list.currentItem()
+        index = item.data(Qt.UserRole) if item is not None else None
+        action = 'Copy author' if copy else 'Move author'
+        if index is None:
+            QMessageBox.information(self, action, 'Select an author first.')
+            return
+        source = self.session.authors()[index].getparent()
+        destinations = [(f'Group {number}: {label}', container)
+                        for number, (label, _, _, container) in enumerate(self.session.affiliation_groups(), 1)
+                        if container is not None and container is not source
+                        and self.session._local_name(container) == 'author-group']
+        if not destinations:
+            QMessageBox.information(self, action, 'Add another author group first.')
+            return
+        label, accepted = QInputDialog.getItem(
+            self, action, 'Destination author group', [label for label, _ in destinations], 0, False)
+        if not accepted: return
+        destination = next(container for text, container in destinations if text == label)
+        try:
+            self._record_history()
+            author = self.session.transfer_author(index, destination, copy=copy)
+            new_index = self.session.authors().index(author)
+            self._refresh()
+            for row in range(self.author_list.count()):
+                if self.author_list.item(row).data(Qt.UserRole) == new_index:
+                    self.author_list.setCurrentRow(row)
+                    break
+        except ValueError as exc:
+            QMessageBox.information(self, action, str(exc))
 
     def remove_author(self) -> None:
         if not self.session or self.author_list.currentRow() < 0: return
+        group_path = self.author_list.currentItem().data(Qt.UserRole + 2)
+        if group_path:
+            if QMessageBox.question(
+                self, "Remove author group",
+                "Remove the selected author group, including all its authors and affiliations, from the XML?",
+                QMessageBox.Yes | QMessageBox.No,
+            ) != QMessageBox.Yes:
+                return
+            try:
+                groups = self.session.tree.xpath(group_path, namespaces={
+                    key: value for key, value in self.session.tree.getroot().nsmap.items() if key
+                })
+                if not groups:
+                    raise ValueError("Author groups changed; select the group again")
+                self._record_history()
+                self.session.remove_author_group(groups[0])
+                self._refresh()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Cannot remove author group", str(exc))
+            return
         index = self.author_list.currentItem().data(Qt.UserRole)
         if index is None: return
         if QMessageBox.question(self, "Remove author", "Remove the selected author from the XML?", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes: return

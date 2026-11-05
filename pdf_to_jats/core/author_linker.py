@@ -393,12 +393,13 @@ class AuthorLinker:
         authors_text = [self._normalize_marker_text(text) for text in authors_text]
         affiliations_text = [self._normalize_marker_text(text) for text in affiliations_text]
         known_markers = self._affiliation_letter_markers(affiliations_text)
-        for text in authors_text:
-            for entry in self._split_entries(text):
-                names, institutions = self._split_entry(entry)
-                if names or institutions:
-                    entry_names.append(names)
-                    entry_institutions.append(institutions)
+        # PDF extraction can put consecutive byline rows in separate blocks.
+        # Resolve wrapped names before treating those boundaries as entries.
+        for entry in self._split_entries("\n".join(authors_text)):
+            names, institutions = self._split_entry(entry)
+            if names or institutions:
+                entry_names.append(names)
+                entry_institutions.append(institutions)
 
         expanded_authors = [
             (index, name) for index, names in enumerate(entry_names) for name in names
@@ -577,7 +578,7 @@ class AuthorLinker:
     def _is_wrapped_name_continuation(previous_line: str, next_line: str) -> bool:
         """Recognize a name split at a line edge before a marked surname."""
 
-        previous_tail = re.search(r",\s*([A-Z][A-Za-z'\u2019\-]+)$", previous_line)
+        previous_tail = re.search(r"[,;]\s*([A-Z][A-Za-z'\u2019\-]+)$", previous_line)
         next_head = re.match(
             r"([A-Z][A-Za-z'\u2019\-]+)(?:\d{1,3}|[*\u2020\u2021]+)?(?:,|\s|$)",
             next_line,
@@ -1345,7 +1346,6 @@ class AuthorLinker:
         }
         if lowered in place_tokens or re.fullmatch(r"[A-Z]{1,3}", cleaned):
             return False
-        if len(cleaned) > 8 and sum(1 for ch in cleaned if ch.isupper()) == len([ch for ch in cleaned if ch.isalpha()]):
-            # Very short all-caps shards are usually OCR noise.
-            return False
+        # Byline names may be printed entirely in capitals. Capitalization
+        # alone is not evidence of noise; the content checks above still apply.
         return bool(re.search(r"[A-Za-z]", cleaned))

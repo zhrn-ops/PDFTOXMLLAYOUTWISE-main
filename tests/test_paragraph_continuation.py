@@ -74,6 +74,31 @@ def test_continuation_still_rejects_mismatched_font_sizes():
     assert "font sizes" in reason
 
 
+def test_continuation_uses_body_text_size_instead_of_superscript():
+    window = _window()
+    first = _unit('first', 0, font_size=6)
+    first.metadata['text_spans'] = [
+        {'text': '18', 'size': 6},
+        {'text': 'Department of Neurology, University Hospital', 'size': 10},
+    ]
+    second = _unit('second', 1, y=124, font_size=10)
+    valid, reason = window._selection_looks_like_paragraph_continuation([first, second])
+    assert valid, reason
+
+
+def test_continuation_reads_source_spans_of_merged_paragraph():
+    window = _window()
+    source = _unit('source', 0, font_size=6)
+    source.metadata['text_spans'] = [
+        {'text': '19', 'size': 6}, {'text': 'University Department of Clinical Medicine', 'size': 10}]
+    window.document.raw_blocks = [source]
+    first = _unit('first', 0, font_size=6)
+    first.metadata['merged_block_ids'] = ['source']
+    second = _unit('second', 1, y=124, font_size=10)
+    valid, reason = window._selection_looks_like_paragraph_continuation([first, second])
+    assert valid, reason
+
+
 def test_continuation_still_rejects_plain_blocks():
     window = _window()
     first = _unit("block_001", 0)

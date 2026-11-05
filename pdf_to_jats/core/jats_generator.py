@@ -175,7 +175,6 @@ class JATSGenerator:
                     initials = initials or parsed_initials
                     given_names = given_names or parsed_given_names
                     surname = surname or parsed_surname
-<<<<<<< HEAD
                 elif not given_names and surname and author.display_name.strip():
                     # Initials and surname can already be populated while the
                     # full given name is only present in the display name.
@@ -184,19 +183,10 @@ class JATSGenerator:
                     _, parsed_given_names, parsed_surname = self._split_name(author.display_name)
                     if parsed_surname.casefold() == surname.casefold():
                         given_names = self._sanitize_xml_text(parsed_given_names)
-=======
->>>>>>> d80718b4c1f1312852afe85afc9e672c6363450d
                 if initials and given_names and self._name_token_is_initials(given_names):
                     given_names = ""
                 if initials:
                     etree.SubElement(author_el, self._qname("initials", self.CE_NS)).text = initials
-<<<<<<< HEAD
-=======
-                if given_names:
-                    etree.SubElement(author_el, self._qname("given-name", self.CE_NS)).text = given_names
-                if surname:
-                    etree.SubElement(author_el, self._qname("surname", self.CE_NS)).text = surname
->>>>>>> d80718b4c1f1312852afe85afc9e672c6363450d
                 if author.degrees.strip():
                     etree.SubElement(author_el, self._qname("degrees", self.CE_NS)).text = self._sanitize_xml_text(author.degrees)
                 if surname:
@@ -205,7 +195,7 @@ class JATSGenerator:
                     etree.SubElement(author_el, self._qname("given-name", self.CE_NS)).text = given_names
             if affiliation is not None:
                 affiliation_el = etree.SubElement(author_group, self._qname("affiliation"))
-                self._append_affiliation_text(affiliation_el, affiliation.text)
+                self._append_affiliation(affiliation_el, affiliation)
 
         self._append_correspondence(head, document)
         self._append_grants(head, document)
@@ -334,6 +324,20 @@ class JATSGenerator:
             groups.append((None, unassigned))
         return groups
 
+    def _append_affiliation(self, parent, affiliation):
+        if not affiliation.structured:
+            self._append_affiliation_text(parent, affiliation.text)
+            return
+        for tag in ('organization', 'address-part', 'city', 'state', 'postal-code', 'country'):
+            for value in affiliation.structured.get(tag, []):
+                if not value:
+                    continue
+                node = etree.SubElement(parent, self._qname(tag))
+                node.text = self._sanitize_xml_text(value)
+                if tag == 'country':
+                    node.set('iso-code', self._country_iso_code(value))
+        etree.SubElement(parent, self._qname('source-text', self.CE_NS)).text = self._sanitize_xml_text(affiliation.text)
+
     def _append_affiliation_text(self, parent: Any, text: str) -> None:
         organization, city, country = self._split_affiliation(text)
         if organization:
@@ -367,7 +371,7 @@ class JATSGenerator:
             if affiliation is None:
                 continue
             affiliation_el = etree.SubElement(correspondence, self._qname("affiliation"))
-            self._append_affiliation_text(affiliation_el, affiliation.text)
+            self._append_affiliation(affiliation_el, affiliation)
 
     def _split_name(self, full_name: str) -> tuple[str, str, str]:
         parts = [part for part in full_name.split() if part]
@@ -425,6 +429,7 @@ class JATSGenerator:
 
     def _country_iso_code(self, country: str) -> str:
         country_codes = {
+            "colombia": "COL",
             "japan": "JPN",
             "united states": "USA",
             "united states of america": "USA",

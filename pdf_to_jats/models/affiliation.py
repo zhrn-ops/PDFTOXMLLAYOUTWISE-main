@@ -20,4 +20,5 @@ class Affiliation:
     marker: str = ""
     raw_marker: str = ""
     markers: list[str] = field(default_factory=list)
+    structured: dict[str, list[str]] = field(default_factory=dict)
 

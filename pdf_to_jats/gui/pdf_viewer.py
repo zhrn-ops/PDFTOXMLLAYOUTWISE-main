@@ -9,8 +9,8 @@ from typing import Any
 
 import fitz
 from PySide6.QtCore import QObject, QPointF, QRect, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QBrush, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QRubberBand, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QBrush, QImage, QPainter, QPen, QPixmap, QShortcut, QKeySequence
+from PySide6.QtWidgets import QApplication, QMenu, QHBoxLayout, QLabel, QPushButton, QRubberBand, QScrollArea, QVBoxLayout, QWidget
 
 
 class _PageRasterWorker(QObject):
@@ -52,6 +52,7 @@ class PdfPageLabel(QLabel):
     zoneMoved = Signal(str, list)
     zoneCreated = Signal(list)
     zoneEditFinished = Signal(str)
+    textRectSelected = Signal(list)
 
     def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
@@ -80,6 +81,8 @@ class PdfPageLabel(QLabel):
             super().mousePressEvent(event)
             return
         modifiers = event.modifiers()
+        if self.property('textSelectable'):
+            self.setFocus()
         range_select = bool(modifiers & Qt.ControlModifier and modifiers & Qt.ShiftModifier)
         additive = bool(modifiers & Qt.ControlModifier) and not range_select
         hit = self._hit_test(event.position() if hasattr(event, "position") else event.pos(), prefer_blocks=additive or range_select)
@@ -200,6 +203,19 @@ class PdfPageLabel(QLabel):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if self.property('textSelectable') and event.button() == Qt.LeftButton:
+            if self._draw_start is not None:
+                end = event.position()
+                scale = float(self.property('pageScale') or 1)
+                rect = [min(self._draw_start.x(), end.x()) / scale,
+                        min(self._draw_start.y(), end.y()) / scale,
+                        max(self._draw_start.x(), end.x()) / scale,
+                        max(self._draw_start.y(), end.y()) / scale]
+                self.textRectSelected.emit(rect if rect[2] - rect[0] > 2 and rect[3] - rect[1] > 2 else [])
+            self._drawing_zone = False
+            self._draw_start = self._draw_current = None
+            event.accept()
+            return
         finished_block_id = self._block_drag_id
         self._block_drag_id = None
         self._block_drag_start = None
@@ -260,6 +276,14 @@ class PdfPageLabel(QLabel):
     def _on_context_menu_requested(self, pos) -> None:
         """Offer the block menu for a right-click, ignoring empty page areas."""
 
+        if self.property('textSelectable'):
+            menu = QMenu(self)
+            action = menu.addAction('Copy')
+            text = self.property('selectedPdfText') or ''
+            action.setEnabled(bool(text))
+            action.triggered.connect(lambda: QApplication.clipboard().setText(text))
+            menu.exec(self.mapToGlobal(pos))
+            return
         block_id = self._block_id_at(pos)
         if block_id:
             self.blockContextRequested.emit(block_id, self.mapToGlobal(pos))
@@ -381,10 +405,12 @@ class PDFViewer(QWidget):
 
     pageChanged = Signal(int, int)
 
-    def __init__(self, parent: QWidget | None = None, *, text_blocks_only: bool = False) -> None:
+    def __init__(self, parent: QWidget | None = None, *, text_blocks_only: bool = False, text_selectable: bool = False) -> None:
         super().__init__(parent)
         self._text_blocks_only = text_blocks_only
         self._pdf_path: Path | None = None
+        self._text_selectable = text_selectable
+        self._selected_pdf_text = ''
         self._page_count = 0
         self._page_sizes: list[tuple[float, float]] = []
         self._page_offsets: list[int] = []
@@ -432,6 +458,16 @@ class PDFViewer(QWidget):
         controls.addWidget(self.zoom_in_btn)
         self.page_indicator = QLabel("Page 0 of 0")
         controls.addWidget(self.page_indicator)
+        self.copy_text_btn = QPushButton('Copy selected text')
+        self.copy_text_btn.setVisible(text_selectable)
+        self.copy_text_btn.setEnabled(False)
+        self.copy_text_btn.setToolTip('Drag a rectangle around PDF text, then copy it (Ctrl+C)')
+        self.copy_text_btn.clicked.connect(self.copy_selected_text)
+        controls.addWidget(self.copy_text_btn)
+        self._copy_shortcut = QShortcut(QKeySequence.Copy, self)
+        self._copy_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._copy_shortcut.setEnabled(text_selectable)
+        self._copy_shortcut.activated.connect(self.copy_selected_text)
         controls.addStretch(1)
         layout.addLayout(controls)
         self.label = PdfPageLabel("Drop a PDF to preview it here.")
@@ -460,6 +496,12 @@ class PDFViewer(QWidget):
     def _forward_page_signals(self, page_label: PdfPageLabel, page_index: int) -> None:
         """Relay clicks and edits from every page through the original label."""
 
+        if self._text_selectable:
+            page_label.setProperty('textSelectable', True)
+            page_label.setFocusPolicy(Qt.StrongFocus)
+            page_label.setCursor(Qt.IBeamCursor)
+            page_label.textRectSelected.connect(
+                lambda rect, index=page_index: self._select_pdf_text(index, rect))
         for name in (
             "blockSelected", "blockRangeSelected", "blocksRectSelected",
             "blockContextRequested", "blockMoved", "blockPieceMoved", "blockEditFinished",
@@ -476,6 +518,25 @@ class PDFViewer(QWidget):
                     lambda *args, index=page_index, signal_name=name:
                     self._relay_page_signal(index, signal_name, *args)
                 )
+
+    def copy_selected_text(self) -> None:
+        if self._selected_pdf_text:
+            QApplication.clipboard().setText(self._selected_pdf_text)
+
+    def _select_pdf_text(self, page_index: int, rect: list) -> None:
+        self._selected_pdf_text = ''
+        if self._pdf_path and rect:
+            with fitz.open(self._pdf_path) as document:
+                page = document[page_index]
+                clip = fitz.Rect(rect) * page.derotation_matrix
+                self._selected_pdf_text = page.get_text('text', clip=clip, sort=True).strip()
+        for index, label in self._page_labels.items():
+            label.setProperty('selectedPdfText', self._selected_pdf_text if index == page_index else '')
+            if index != page_index:
+                label._selection_band.hide()
+        self.copy_text_btn.setEnabled(bool(self._selected_pdf_text))
+        self.copy_text_btn.setToolTip('Copy selected text (Ctrl+C)' if self._selected_pdf_text
+                                     else 'No text selected. Drag around text; scanned pages require OCR.')
 
     def _relay_page_signal(self, page_index: int, signal_name: str, *args) -> None:
         self._set_active_page(page_index)
@@ -701,6 +762,7 @@ class PDFViewer(QWidget):
     ) -> None:
         self._generation += 1
         self._pdf_path = Path(pdf_path)
+        self._select_pdf_text(-1, [])
         # Compatibility for existing callers; the viewer keeps only detached
         # metadata, never a live PyMuPDF document handle.
         if document is not None:
@@ -812,6 +874,7 @@ class PDFViewer(QWidget):
         return bool(self._pdf_path and str(self._pdf_path) == str(Path(path)))
 
     def set_zoom(self, scale: float) -> None:
+        self._select_pdf_text(-1, [])
         self._page_scale = scale
         self._resize_page_labels()
         self.render_page(self._page_index)

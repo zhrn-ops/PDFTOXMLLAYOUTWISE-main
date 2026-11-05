@@ -14,6 +14,7 @@ import fitz
 from pdf_to_jats.models.block import TextBlock, reading_order_key
 from pdf_to_jats.models.document import Document
 from pdf_to_jats.core.inline_script_detector import InlineScriptDetector
+from pdf_to_jats.core.rtl_text import has_presentation_forms, repair_positioned_lines
 
 try:  # numpy turns the per-line ink scan into C-speed slicing; it is optional.
     import numpy as _numpy
@@ -86,6 +87,10 @@ class PDFExtractor:
             for page_index, page in enumerate(pdf, start=1):
                 visible_area = self._visible_page_rect(page)
                 text_dict = page.get_text("dict", clip=visible_area)
+                if any(has_presentation_forms(span.get('text', ''))
+                       for block in text_dict.get('blocks', []) if block.get('type') == 0
+                       for line in block.get('lines', []) for span in line.get('spans', [])):
+                    text_dict = repair_positioned_lines(page.get_text('rawdict', clip=visible_area))
                 page_ink = (
                     _PageInk(self._render_visible_page(page, visible_area))
                     if self.visible_text_only

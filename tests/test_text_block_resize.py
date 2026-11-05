@@ -40,6 +40,37 @@ def resize_window(qapp, monkeypatch, tmp_path):
     window.close()
 
 
+def test_review_parsers_keep_separate_drafts_for_same_article(resize_window, monkeypatch):
+    from pdf_to_jats.core.author_linker import AuthorLinker
+    window, first = resize_window
+    monkeypatch.setattr(QMessageBox, 'information', lambda *args: None)
+    monkeypatch.setattr(window, '_set_article_finish_busy', lambda busy: None)
+    window._startup_flow = True
+    window._explicit_number_workflow = True
+    first.role = 'title'
+    first.text = 'Parser comparison'
+    window._selected_block_ids = {first.id}
+    assert window._start_article_from_number('P-123')
+    segment, key = window._current_segment()
+    window._finish_parser = 'qwen'
+    window._on_article_finish_complete(segment, key, {}, None)
+    qwen_key = window._article_draft_keys[f'{key}|parser:qwen']
+    editor = window._xml_correction_window
+    editor.title_edit.setPlainText('Corrected Qwen draft')
+    window._unlock_segment_blocks(segment, key)
+    window._current_segment_key = key
+    window.review_parser.setCurrentIndex(1)
+    assert window.review_parser.currentData() == 'grobid'
+    window._finish_parser = 'grobid'
+    linked = AuthorLinker().link_from_texts(['Karen Liceth Melo2'], ['2 Universidad de los Andes'])
+    window._on_article_finish_complete(segment, key, linked, None)
+    grobid_key = window._article_draft_keys[f'{key}|parser:grobid']
+    assert grobid_key != qwen_key
+    assert 'Melo' in editor.session.xml_text()
+    assert editor.activate_draft(qwen_key)
+    assert editor.session.title() == 'Corrected Qwen draft'
+
+
 def test_signal_updates_geometry_and_undo_restores_one_gesture(resize_window):
     window, block = resize_window
     original = asdict(block)
@@ -221,6 +252,40 @@ def test_split_refuses_unmatched_text_and_keeps_inline_runs(tmp_path):
     assert split_resized_block(block, list(rect), path) is None
 
 
+def test_continue_paragraph_creates_a_merged_block_and_can_be_undone(resize_window, monkeypatch):
+    window, first = resize_window
+    monkeypatch.setattr(QMessageBox, "information", lambda *args: None)
+    first.text = "First part of the paragraph"
+    first.metadata["is_paragraph_unit"] = True
+    first.metadata["merged_block_ids"] = ["source_first"]
+    second = deepcopy(first)
+    second.id = "second"
+    second.text = "continues with more text here"
+    second.y = 64
+    second.bbox = [20, 64, 100, 104]
+    second.metadata["reading_order"] = 1
+    window.document.blocks.append(second)
+    window._selected_block_ids = {first.id, second.id}
+
+    window.continue_selected_paragraphs()
+
+    assert len(window.document.blocks) == 1
+    merged = window.document.blocks[0]
+    assert merged.text == "First part of the paragraph continues with more text here"
+    assert merged.metadata["merge_source"] == "paragraph_continuation"
+    assert merged.metadata["merged_regions"] == [
+        {"page": 1, "bbox": first.bbox}, {"page": 1, "bbox": second.bbox},
+    ]
+    assert window._selected_block_ids == {merged.id}
+    assert merged.id in window.viewer._blocks_by_id
+    assert first.id not in window.viewer._blocks_by_id
+    assert not window._html_preview_merges
+    window.undo_last_merge()
+    assert [block.id for block in window.document.blocks] == [first.id, second.id]
+    window.redo_last_merge()
+    assert [block.text for block in window.document.blocks] == [merged.text]
+
+
 def test_merge_keeps_separate_outlines_and_gap_is_not_clickable(resize_window):
     window, first = resize_window
     second = deepcopy(first)
@@ -316,6 +381,45 @@ def test_apply_role_to_merged_group_in_active_article(resize_window, monkeypatch
     restored = next(b for b in window.document.blocks if b.id == merged.id)
     assert restored.role == role
     assert restored.metadata["role_source"] == "manual"
+
+
+def test_assigning_missed_role_reopens_reviewed_article_and_updates_xml(resize_window, monkeypatch):
+    window, first = resize_window
+    monkeypatch.setattr(QMessageBox, 'information', lambda *args: None)
+    window._startup_flow = True
+    window._explicit_number_workflow = True
+    first.role = 'title'
+    first.text = 'Study title'
+    window._selected_block_ids = {first.id}
+    assert window._start_article_from_number('P-123')
+    segment, key = window._current_segment()
+    old_document = window._document_for_segment(segment, window.document)
+    editor = window._xml_correction_window
+    from pathlib import Path
+    editor.load_xml_text(window.generator.to_string(old_document), Path('article.xml'))
+    draft_key = editor._draft_key
+    window._article_draft_keys[key] = draft_key
+    window._lock_segment_blocks(segment, key)
+    window._current_segment_key = None
+    window._refresh_after_article_change()
+
+    second = deepcopy(first)
+    second.id = 'missed'
+    second.text = 'Previously missed abstract paragraph.'
+    second.role = 'unclassified'
+    second.metadata = {'reading_order': 1}
+    window.document.blocks.append(second)
+    window._selected_block_ids = {second.id}
+    window.props.role_editor.setCurrentText('abstract')
+    window.apply_selected_block_role()
+
+    assert key not in window._finished_segment_keys
+    assert window._current_segment()[1] == key
+    assert window._article_owning(second.id) is segment
+    updated = window._document_for_segment(segment, window.document)
+    editor._incoming_draft_key = draft_key
+    editor.load_xml_text(window.generator.to_string(updated), Path('article.xml'))
+    assert second.text in editor.session.abstract()
 
 
 @pytest.mark.parametrize("scale", [1.0, 2.0])

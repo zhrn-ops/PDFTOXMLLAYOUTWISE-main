@@ -107,6 +107,25 @@ def test_regeneration_preserves_corrections_and_archives_accepted_revision(qapp,
         window.deleteLater()
 
 
+def test_regeneration_updates_uncorrected_draft_without_prompt(qapp, monkeypatch):
+    window = XmlCorrectionWindow()
+    prompts = []
+    monkeypatch.setattr(window, 'review_regeneration', lambda *args: prompts.append(args) or False)
+    try:
+        window.load_xml_text(xml('Initial'), Path('article.xml'))
+        key = window._draft_key
+        updated = xml('Initial').replace('<p>Text</p>', '<p>Text plus the newly assigned paragraph</p>')
+        window._incoming_draft_key = key
+        assert window.load_xml_text(updated, Path('article.xml'))
+        assert window.session.abstract() == 'Text plus the newly assigned paragraph'
+        assert window._draft_key == key
+        assert not prompts
+        assert window.activate_draft(key + '|revision:1')
+        assert window.session.abstract() == 'Text'
+    finally:
+        window.deleteLater()
+
+
 def test_timestamp_only_regeneration_keeps_corrected_draft_without_prompt(qapp, monkeypatch):
     window = XmlCorrectionWindow()
     generated = JATSGenerator().to_string(Document(title='Original', abstract='Study'))

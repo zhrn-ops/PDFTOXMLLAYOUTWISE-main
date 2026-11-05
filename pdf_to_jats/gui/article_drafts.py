@@ -77,6 +77,9 @@ class ArticleDrafts:
         self._history_index = record.get('history_index', len(self._history) - 1)
         self._refresh()
         if record.get('raw', record['xml']) != record['xml']:
+            # The retained text is the accepted state for this draft, so a
+            # comment it already holds is not treated as a newly added one.
+            self._xml_text_baseline = record['raw']
             self.raw.setPlainText(record['raw'])
         session.dirty = record.get('dirty', False)
         self.set_pdf_source(Path(record['pdf']) if record.get('pdf') else None)

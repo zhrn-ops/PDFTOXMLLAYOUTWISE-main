@@ -6,7 +6,7 @@ import pytest
 from lxml import etree
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QLineEdit, QPlainTextEdit, QPushButton, QSplitter,
+    QDialog, QDialogButtonBox, QLineEdit, QPlainTextEdit, QPushButton, QSplitter, QMessageBox,
 )
 
 from pdf_to_jats.core.xml_correction import XmlDocumentSession
@@ -419,7 +419,29 @@ def test_dialog_numbers_added_organizations_after_existing_ones(qapp, monkeypatc
         window.deleteLater()
 
 
-def test_organization_commas_are_removed_before_writing_xml(tmp_path):
+def test_added_organizations_use_separate_lines_without_indentation():
+    source = (
+        '<root xmlns:ce="http://www.elsevier.com/xml/ani/common">\n'
+        '  <affiliation>\n'
+        '    <organization>University</organization>\n'
+        '    <city>Toulouse</city>\n'
+        '    <ce:source-text>University, <ce:italic>INRAE</ce:italic>, ENVT</ce:source-text>\n'
+        '  </affiliation>\n</root>'
+    )
+    session = XmlDocumentSession.from_text(source, Path('draft.xml'))
+    affiliation = session.tree.getroot()[0]
+    values = session.affiliation_form(affiliation)
+    values.update({'organization:2': 'INRAE', 'organization:3': 'ENVT'})
+    session.set_affiliation_form(affiliation, values)
+    result = session.xml_text()
+    assert ('<organization>University</organization>\n'
+            '<organization>INRAE</organization>\n'
+            '<organization>ENVT</organization>\n'
+            '<city>Toulouse</city>') in result
+    assert '<ce:source-text>University, <ce:italic>INRAE</ce:italic>, ENVT</ce:source-text>\n</affiliation>' in result
+
+
+def test_organization_commas_are_preserved_when_writing_xml(tmp_path):
     session = XmlDocumentSession.from_text(ANI, tmp_path / 'draft.xml')
     affiliation = _affiliation(session, 'Uni Town')
     values = session.affiliation_form(affiliation)
@@ -432,13 +454,13 @@ def test_organization_commas_are_removed_before_writing_xml(tmp_path):
     updated = _affiliation_xml(result, 'aff1')
     assert [child.text for child in updated.findall(
         '{http://www.elsevier.com/xml/ani/ani}organization')] == [
-        'Dept. of Internal Medicine', 'Uni Medical School', 'UniMedical',
+        ', Dept. of Internal Medicine', 'Uni, Medical School', 'Uni,Medical',
     ]
     # Comma-rich prose in other fields is untouched.
     assert updated.find('{http://www.elsevier.com/xml/ani/ani}city').text == 'Town'
 
 
-def test_dialog_organization_field_never_holds_commas(qapp, monkeypatch):
+def test_dialog_organization_field_preserves_commas(qapp, monkeypatch):
     source = ANI.replace(
         '<organization>Uni</organization>',
         '<organization>, Dept. of Internal Medicine </organization>',
@@ -452,11 +474,10 @@ def test_dialog_organization_field_never_holds_commas(qapp, monkeypatch):
 
     def fill(dialog):
         field = dialog.findChild(QLineEdit, 'affiliation_organization')
-        # The stored value is shown already cleaned when the dialog opens.
-        assert field.text() == 'Dept. of Internal Medicine'
-        # Typing a comma drops it immediately.
+        # Existing and newly typed commas are retained.
+        assert field.text() == ', Dept. of Internal Medicine'
         field.setText('Dept. of Internal Medicine, Oncology')
-        assert field.text() == 'Dept. of Internal Medicine Oncology'
+        assert field.text() == 'Dept. of Internal Medicine, Oncology'
         dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).click()
         return QDialog.Rejected
 
@@ -467,8 +488,61 @@ def test_dialog_organization_field_never_holds_commas(qapp, monkeypatch):
         updated = _affiliation_xml(result, 'aff1')
         assert [child.text for child in updated.findall(
             '{http://www.elsevier.com/xml/ani/ani}organization')] == [
-            'Dept. of Internal Medicine Oncology',
+            'Dept. of Internal Medicine, Oncology',
         ]
+    finally:
+        window.deleteLater()
+
+
+@pytest.mark.parametrize('confirm,save', [(True, True), (False, True), (True, False)])
+def test_split_organization_preview_preserves_other_fields_and_undo(qapp, monkeypatch, confirm, save):
+    source = ANI.replace('<organization>Uni</organization>',
+                         '<organization>Before</organization>'
+                         '<organization>Dept, , Faculty, University,</organization>'
+                         '<organization>After</organization>').replace(
+                             '<city>Town</city>', '<city>Town, District</city>'
+                             '<ce:source-text>Original, verbatim source</ce:source-text>')
+    window = XmlCorrectionWindow()
+    window.session = XmlDocumentSession.from_text(source, Path('draft.xml'))
+    window._refresh()
+    original = window.session.xml_text()
+    window.author_list.setCurrentRow(0)
+    previews = []
+
+    def preview(*args):
+        previews.append(args[2])
+        return QMessageBox.Ok if confirm else QMessageBox.Cancel
+
+    def edit(dialog):
+        assert dialog.findChild(QPushButton, 'affiliation_split_city') is None
+        dialog.findChild(QPushButton, 'affiliation_split_organization:2').click()
+        expected = ['Before', 'Dept', 'Faculty', 'University', 'After'] if confirm else [
+            'Before', 'Dept, , Faculty, University,', 'After']
+        for i, value in enumerate(expected, 1):
+            key = 'organization' if i == 1 else f'organization:{i}'
+            assert dialog.findChild(QLineEdit, f'affiliation_{key}').text() == value
+        assert dialog.findChild(QLineEdit, 'affiliation_city').text() == 'Town, District'
+        assert dialog.findChild(QPlainTextEdit, 'affiliation_source-text').toPlainText() == 'Original, verbatim source'
+        dialog.findChild(QDialogButtonBox).button(
+            QDialogButtonBox.Ok if save else QDialogButtonBox.Cancel).click()
+        return QDialog.Rejected
+
+    monkeypatch.setattr(QMessageBox, 'question', preview)
+    monkeypatch.setattr(QDialog, 'exec', edit)
+    try:
+        window.edit_author()
+        assert 'Organization 2: Dept' in previews[0]
+        if confirm and save:
+            result = window.session.xml_text()
+            organizations = window.session.tree.xpath(
+                '//*[local-name()="author-group"]/*[local-name()="affiliation"]/*[local-name()="organization"]/text()')
+            assert organizations == ['Before', 'Dept', 'Faculty', 'University', 'After']
+            window._undo_field()
+            assert window.session.xml_text() == original
+            window._redo_field()
+            assert window.session.xml_text() == result
+        else:
+            assert window.session.xml_text() == original
     finally:
         window.deleteLater()
 
