@@ -42,17 +42,42 @@ class JATSGenerator:
 
     def to_bytes(self, document: Document) -> bytes:
         """Build ANI XML in memory without creating an output file."""
-
         root = self._build_root(document)
+        self._line_break_elements(root)
         if LXML_AVAILABLE:
             return etree.tostring(
                 root,
-                pretty_print=True,
+                pretty_print=False,
                 xml_declaration=True,
                 encoding="UTF-8",
                 standalone=False,
             )
         return etree.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def _line_break_elements(self, node: Any, in_inline: bool = False) -> None:
+        """Put every element-only container on its own lines, without indent."""
+        def local_name(element: Any) -> str:
+            return element.tag.rsplit('}', 1)[-1] if isinstance(element.tag, str) else ''
+
+        # Text-bearing/inline elements are kept intact so their spacing and
+        # mixed content are never rewritten by line breaks.
+        inline = {"p", "para", "titletext", "source-text", "organization",
+                  "address-part", "city", "state", "postal-code", "keyword",
+                  "kwd", "keywd", "italic", "sub", "sup", "inf", "mi", "mo",
+                  "mn", "mtext"}
+        in_inline = in_inline or local_name(node) in inline
+        if (len(node) and not in_inline
+                and not (node.text or "").strip()
+                and all(not (child.tail or "").strip() for child in node)):
+            node.text = "\n"
+            for child in node:
+                if isinstance(child.tag, str):
+                    self._line_break_elements(child, in_inline)
+                child.tail = "\n"
+            return
+        for child in node:
+            if isinstance(child.tag, str):
+                self._line_break_elements(child, in_inline)
 
     def to_string(self, document: Document) -> str:
         """Return generated ANI XML for the correction workspace."""

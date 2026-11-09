@@ -624,8 +624,6 @@ class XmlDocumentSession:
             node = etree.SubElement(node, f'{{{ns}}}affiliation' if ns else 'affiliation')
         # Anything the form no longer lists at the end of the organization
         # sequence was removed by the user.
-        child_spacing = node.text
-        closing_spacing = node[-1].tail if len(node) else None
         ns = etree.QName(node).namespace
         qname = f'{{{ns}}}organization' if ns else 'organization'
         organizations = node.findall(qname)
@@ -661,16 +659,6 @@ class XmlDocumentSession:
                 child.text = value
             if iso_key in values and values[iso_key] != old.get(iso_key):
                 child.set('iso-code', values[iso_key])
-        # lxml does not pretty-print newly inserted siblings when the parent
-        # already contains indentation text. Restore only this container's
-        # whitespace, leaving source text and nested inline markup untouched.
-        if (child_spacing and '\n' in child_spacing and not child_spacing.strip()
-                and closing_spacing and '\n' in closing_spacing and not closing_spacing.strip()
-                and all(not (child.tail or '').strip() for child in node)):
-            for child in node:
-                child.tail = child_spacing
-            if len(node):
-                node[-1].tail = closing_spacing
         self.dirty = True
         self.validation = []
         return True
@@ -784,14 +772,6 @@ class XmlDocumentSession:
             if language.strip():
                 node.set(self._xml_lang_attr(), language.strip())
             node.set("original", "n")
-        # The previous title's tail is the container's indentation; reuse it so
-        # a newly inserted sibling looks like the titles that were already there.
-        sibling = parent[-2] if len(parent) > 1 else None
-        if sibling is not None:
-            tail = sibling.tail
-            (parent if jats else node).tail = tail if tail and not tail.strip() else "\n"
-        elif jats:
-            parent.tail = "\n"
         self._set_text(node, value)
 
     def remove_title(self, index: int = 0) -> None:
@@ -1362,35 +1342,36 @@ class XmlDocumentSession:
         return result
 
     def xml_bytes(self) -> bytes:
+        # Put every element-only container on its own lines, with no indent.
+        # Text-bearing/inline elements are left intact so meaningful spacing
+        # inside mixed content is never rewritten by line breaks.
         tree = deepcopy(self.tree)
-        # Only known structural containers get display indentation. Inline and
-        # unknown elements keep exact text/tails, including adjacent formulas.
-        containers = {"article", "front", "article-meta", "title-group", "contrib-group",
-                      "contrib", "name", "kwd-group", "units", "unit", "unit-info",
-                      "unit-content", "bibrecord", "head", "citation-info", "citation-title",
-                      "author-group", "author", "affiliation", "abstracts", "body"}
-        def separate_elements(node):
-            if not isinstance(node.tag, str) or not len(node):
+        inline = {"p", "para", "titletext", "source-text", "organization",
+                  "address-part", "city", "state", "postal-code", "keyword",
+                  "kwd", "keywd", "italic", "sub", "sup", "inf", "mi", "mo",
+                  "mn", "mtext"}
+
+        def local_name(node):
+            return etree.QName(node).localname if isinstance(node.tag, str) else ''
+
+        def line_break_elements(node, preserve_space=False, in_inline=False):
+            if not isinstance(node.tag, str):
                 return
-            if node.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve':
+            preserve_space = preserve_space or (
+                node.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve')
+            in_inline = in_inline or local_name(node) in inline
+            if (len(node) and not preserve_space and not in_inline
+                    and not (node.text or '').strip()
+                    and all(not (child.tail or '').strip() for child in node)):
+                node.text = '\n'
+                for child in node:
+                    line_break_elements(child, preserve_space, in_inline)
+                    child.tail = '\n'
                 return
-            name = etree.QName(node).localname
-            paragraph_container = name == "abstract" and all(
-                isinstance(child.tag, str) and etree.QName(child).localname in {"p", "para"}
-                for child in node)
-            # Older metadata imports use a neutral root around ANI fields.
-            metadata_wrapper = name == "root" and all(
-                isinstance(child.tag, str) and etree.QName(child).localname in {"affiliation", "author-group"}
-                for child in node)
-            if name not in containers and not paragraph_container and not metadata_wrapper:
-                return
-            if (node.text or '').strip() or any((child.tail or '').strip() for child in node):
-                return
-            node.text = '\n'
             for child in node:
-                separate_elements(child)
-                child.tail = '\n'
-        separate_elements(tree.getroot())
+                line_break_elements(child, preserve_space, in_inline)
+
+        line_break_elements(tree.getroot())
         return etree.tostring(tree, encoding=self.encoding, xml_declaration=True)
 
     def xml_text(self) -> str:

@@ -437,8 +437,9 @@ def test_added_organizations_use_separate_lines_without_indentation():
     assert ('<organization>University</organization>\n'
             '<organization>INRAE</organization>\n'
             '<organization>ENVT</organization>\n'
-            '<city>Toulouse</city>') in result
-    assert '<ce:source-text>University, <ce:italic>INRAE</ce:italic>, ENVT</ce:source-text>\n</affiliation>' in result
+            '<city>Toulouse</city>\n'
+            '<ce:source-text>University, <ce:italic>INRAE</ce:italic>, ENVT</ce:source-text>\n'
+            '</affiliation>') in result
 
 
 def test_organization_commas_are_preserved_when_writing_xml(tmp_path):

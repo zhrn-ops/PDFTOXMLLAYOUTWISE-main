@@ -474,8 +474,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 return self.activate_draft(key)
             baseline = previous.get('generated_xml')
             if baseline is not None:
-                # Compare using the editor's serialization: opening compact
-                # XML adds indentation but is not a manual correction.
+                # Compare using the editor's serialization.
                 baseline = XmlDocumentSession.from_text(baseline, label_path).xml_text()
             corrected = (
                 self._regeneration_content(previous['xml'])
