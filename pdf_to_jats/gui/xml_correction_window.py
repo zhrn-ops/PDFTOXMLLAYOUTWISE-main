@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from copy import deepcopy
 
 import fitz
 from lxml import etree
@@ -15,6 +16,8 @@ from PySide6.QtWidgets import (
 )
 
 from pdf_to_jats.core.xml_correction import XmlDocumentSession, normalize_organization
+from pdf_to_jats.core.draft_workspace import canonical_history
+from pdf_to_jats.core.xml_validation import ExportMode, SchemaProfile, ValidationStatus
 from pdf_to_jats.core.inline_script_detector import preserve_matching_runs
 from pdf_to_jats.gui.pdf_viewer import PDFViewer
 from pdf_to_jats.gui.xml_code_editor import XmlCodeEditor
@@ -22,6 +25,10 @@ from pdf_to_jats.gui.article_drafts import ArticleDrafts
 from pdf_to_jats.gui.styles import themed_style
 
 SCRIPT_COLORS = {"sup": "#78AAFF", "sub": "#FBBF24"}
+TITLE_LANGUAGES = (
+    "ENG", "FAS", "ARA", "FRA", "DEU", "SPA", "ITA", "POR", "RUS",
+    "TUR", "ZHO", "JPN", "KOR", "UND",
+)
 SCRIPT_BACKGROUNDS = {
     'dark': {'sup': '#183653', 'sub': '#513a10'},
     'light': {'sup': '#cfe4ff', 'sub': '#ffe39a'},
@@ -122,6 +129,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self.setMinimumSize(900, 620)
         self.setStyleSheet("QWidget#xmlCorrectionWorkspace { background:#101d2c; color:#e7f0ff; } QLabel { color:#dce9fa; } QPushButton { background:#14283c; color:#e7f0ff; border:1px solid #294663; border-radius:5px; padding:7px 12px; } QPushButton:hover { background:#1b3a59; } QLineEdit,QPlainTextEdit,QListWidget { background:#091421; color:#e7f0ff; border:1px solid #294663; border-radius:4px; padding:6px; } QTabWidget::pane { border:1px solid #294663; } QTabBar::tab { background:#14283c; color:#cfe0f2; padding:8px 14px; } QTabBar::tab:selected { background:#0874d1; }")
         self.session: XmlDocumentSession | None = None
+        self.schema_profile: SchemaProfile | None = None
         self._syncing = False
         self._xml_text_baseline = ''
         self._init_drafts()
@@ -163,14 +171,56 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         splitter = QSplitter(Qt.Horizontal)
         self.tabs = QTabWidget()
         title_page = QWidget(); title_layout = QVBoxLayout(title_page)
-        title_layout.addWidget(QLabel("Title"))
+        title_heading = QHBoxLayout()
+        title_heading.addWidget(QLabel("Title"))
+        title_heading.addStretch(1)
+        title_heading.addWidget(QLabel("Language (xml:lang)"))
+        self.title_language = QComboBox()
+        self.title_language.setEditable(True)
+        self.title_language.addItems(TITLE_LANGUAGES)
+        self.title_language.setMaximumWidth(110)
+        self.title_language.setToolTip(
+            "Language code for the primary title, e.g. ENG or FAS. "
+            "Use the same code as the title's printed language."
+        )
+        self.title_language.activated.connect(lambda _index: self._title_language_changed())
+        if self.title_language.lineEdit() is not None:
+            self.title_language.lineEdit().editingFinished.connect(self._title_language_changed)
+        title_heading.addWidget(self.title_language)
+        title_layout.addLayout(title_heading)
         self.title_edit = QPlainTextEdit()
         self.title_edit.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.title_edit.setPlaceholderText("Enter or edit the article title")
         self.title_edit.textChanged.connect(self._title_changed)
         title_layout.addWidget(self._formatting_toolbar(self.title_edit, "title"))
-        title_layout.addWidget(self.title_edit, 1)
+        title_layout.addWidget(self.title_edit, 2)
         title_layout.addWidget(_script_legend())
+        other_title_heading = QLabel("Other language titles")
+        other_title_heading.setStyleSheet("font-weight:600;padding-top:8px;")
+        other_title_heading.setToolTip(
+            "Translated titles are written as extra titletext/article-title nodes "
+            "with their own xml:lang."
+        )
+        title_layout.addWidget(other_title_heading)
+        self.other_title_list = QListWidget()
+        self.other_title_list.setObjectName("other_titles")
+        self.other_title_list.setWordWrap(True)
+        self.other_title_list.itemDoubleClicked.connect(lambda _item: self.edit_other_title())
+        self.other_title_list.currentRowChanged.connect(self._other_title_selection_changed)
+        title_layout.addWidget(self.other_title_list, 1)
+        other_title_buttons = QHBoxLayout()
+        self.add_other_title_button = QPushButton("Add title")
+        self.add_other_title_button.setToolTip("Add a title in another language")
+        self.add_other_title_button.clicked.connect(self.add_other_title)
+        self.edit_other_title_button = QPushButton("Edit selected")
+        self.edit_other_title_button.clicked.connect(self.edit_other_title)
+        self.remove_other_title_button = QPushButton("Remove")
+        self.remove_other_title_button.setToolTip("Remove this translated title from the XML")
+        self.remove_other_title_button.clicked.connect(self.remove_other_title)
+        other_title_buttons.addWidget(self.add_other_title_button)
+        other_title_buttons.addWidget(self.edit_other_title_button)
+        other_title_buttons.addWidget(self.remove_other_title_button)
+        title_layout.addLayout(other_title_buttons)
         self.tabs.addTab(title_page, "Title")
         self.author_list = QListWidget()
         self.author_list.itemDoubleClicked.connect(lambda _item: self.edit_author())
@@ -310,7 +360,26 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             )
             editor.installEventFilter(self)
             editor.viewport().installEventFilter(self)
-        footer = QHBoxLayout(); self.status = QLabel("Ready"); footer.addWidget(self.status,1); footer.addWidget(QLabel("Save drafts anytime; validate before export.")); save = QPushButton("Validate && Export"); save.clicked.connect(self.save_copy); footer.addWidget(save); root.addLayout(footer)
+        schema_row = QHBoxLayout()
+        self.schema_label = QLabel("No schema selected ? publisher validation incomplete")
+        self.schema_label.setWordWrap(True)
+        schema_row.addWidget(self.schema_label, 1)
+        choose_schema = QPushButton("Select local schema?")
+        choose_schema.clicked.connect(self.select_schema)
+        schema_row.addWidget(choose_schema)
+        root.addLayout(schema_row)
+        footer = QHBoxLayout()
+        self.status = QLabel("Ready")
+        footer.addWidget(self.status, 1)
+        save = QPushButton("Draft Export")
+        save.setToolTip("Previously Validate & Export. Checks XML syntax and reports issues; publisher validation may be incomplete.")
+        save.clicked.connect(self.save_copy)
+        footer.addWidget(save)
+        validated = QPushButton("Validated Export")
+        validated.setToolTip("Requires successful validation against the selected local XSD profile. Additional publisher business rules are not certified.")
+        validated.clicked.connect(self.save_validated_copy)
+        footer.addWidget(validated)
+        root.addLayout(footer)
         outer.addWidget(content, 1)
 
     def go_back(self) -> None:
@@ -331,12 +400,20 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         resolved = path.resolve()
         if resolved == self.pdf_preview_path:
             return
-        if self._pdf_text_document is not None:
-            self._pdf_text_document.close()
-        self._pdf_text_document = fitz.open(resolved)
-        self.pdf_preview.load_pdf(str(resolved))
+        candidate = fitz.open(resolved)
+        try:
+            sizes = [(float(page.rect.width), float(page.rect.height)) for page in candidate]
+            first_text = candidate[0].get_text('text') if candidate.page_count else ''
+            self.pdf_preview.load_pdf(str(resolved), page_count=candidate.page_count, page_sizes=sizes)
+        except (OSError, ValueError, RuntimeError):
+            candidate.close()
+            raise
+        previous = self._pdf_text_document
+        self._pdf_text_document = candidate
         self.pdf_preview_path = resolved
-        self._update_pdf_text_page(0, self._pdf_text_document.page_count)
+        self.pdf_text.setPlainText(first_text)
+        if previous is not None:
+            previous.close()
 
     def _update_pdf_text_page(self, page_index: int, _page_count: int) -> None:
         """Populate the copyable text surface for the PDF preview's active page."""
@@ -376,6 +453,11 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         pdf_source: Path | None = None,
     ) -> bool:
         """Load generated XML directly into the correction workspace, without saving it."""
+        try:
+            candidate = XmlDocumentSession.from_text(text, label_path)
+        except (ValueError, etree.XMLSyntaxError) as exc:
+            QMessageBox.critical(self, "Could not prepare XML correction", str(exc))
+            return False
         self._retain_draft()
         key = getattr(self, '_incoming_draft_key', None) or (str(pdf_source or '') + '|' + str(label_path))
         self._incoming_draft_key = None
@@ -399,14 +481,28 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             revision = 1
             while f'{key}|revision:{revision}' in self._drafts:
                 revision += 1
-            archive = dict(previous)
+            archive = deepcopy(previous)
             archive['path'] = str(Path(previous['path']).with_stem(Path(previous['path']).stem + f'_revision_{revision}'))
             self._drafts[f'{key}|revision:{revision}'] = archive
         try:
-            self.session = XmlDocumentSession.from_text(text, label_path)
-            self._draft_key = key
-            self._drafts[key] = {"generated_xml": text}
             self.set_pdf_source(pdf_source)
+            self.session = candidate
+            self._draft_key = key
+            self._drafts[key] = {"generated_xml": text,
+                "original_generated_xml": (previous.get('original_generated_xml', previous.get('generated_xml', text))
+                                           if previous else text)}
+            if previous:
+                from pdf_to_jats.core.xml_validation import fingerprint
+                candidate_fp = fingerprint(candidate.xml_bytes())
+                prev_val = previous.get('last_validated')
+                if prev_val and prev_val.get('revision', {}).get('sha256') == candidate_fp:
+                    candidate.last_validated = deepcopy(prev_val)
+                prev_exp = previous.get('last_export')
+                if prev_exp and prev_exp.get('revision', {}).get('sha256') == candidate_fp:
+                    candidate.last_export = deepcopy(prev_exp)
+                    for field in ('exported_xml', 'export_path'):
+                        if field in previous:
+                            self._drafts[key][field] = previous[field]
         except (OSError, etree.XMLSyntaxError, ValueError) as exc:
             QMessageBox.critical(self, "Could not prepare XML correction", str(exc))
             return False
@@ -427,6 +523,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self._pane_session = s
         self._xml_text_baseline = text
         source_label = "FILE" if s.source_path is not None else "DRAFT IN MEMORY"
+        if s.validation_result is None:
+            self.validation_list.clear()
         validation_label = "Needs review" if s.validation else "Not validated"
         self.summary.setText(f"{source_label}  {s.path.name}  ·  {s.path}\nVALIDATION  {validation_label}     AUTHORS  {len(s.authors())}     AFFILIATIONS  {len(s.affiliations())}     PROFILE  {s.profile}")
         self.status.setText("Draft retained in workspace; Save Draft to keep it after closing")
@@ -485,7 +583,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             self.abstract_find_status.setText('Wrapped' if wrapped else 'Match found')
 
     def _record_history(self):
-        text = self.session.xml_text()
+        text = canonical_history(self.session.xml_text(), self.session.path)
         if getattr(self, "_history_session", None) is not self.session:
             self._history_session = self.session
             self._history = [text]
@@ -573,6 +671,46 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         editor.verticalScrollBar().setValue(scroll_position)
         editor.setFocus()
 
+    def _parser_issue_targets(self) -> dict[str, str]:
+        """Describe the authors and affiliation groups a parser note points at.
+
+        A note is resolved when its target is corrected, so the signature is
+        captured with the note and compared again on every refresh. Structural
+        changes (a moved author, a renamed or removed affiliation) invalidate
+        the note without the parser having to run again.
+        """
+        if not self.session:
+            return {}
+        authors = self.session.authors()
+        signatures: dict[str, str] = {}
+        author_groups: dict[str, list[tuple[str, str]]] = {}
+        for number, (_label, indices, nodes, _container) in enumerate(
+                self.session.affiliation_groups(), 1):
+            labels = tuple(sorted(self._parser_affiliation_signature(node) for node in nodes))
+            seqs = tuple(sorted(authors[index].get('seq') or str(index + 1)
+                                for index in indices))
+            group = str(number)
+            label_signature = '|'.join(labels)
+            signatures[f'group:{group}'] = label_signature + '::' + ','.join(seqs)
+            for index in indices:
+                seq = authors[index].get('seq') or str(index + 1)
+                author_groups.setdefault(seq, []).append((group, label_signature))
+        for index, node in enumerate(authors, 1):
+            seq = node.get('seq') or str(index)
+            name = ' '.join(self.session.author_name(node).split())
+            groups = ';'.join(f'{number}:{label}' for number, label
+                              in sorted(author_groups.get(seq, [])))
+            signatures[f'author:{seq}'] = f'{name}::{groups}'
+        return signatures
+
+    def _parser_affiliation_signature(self, node) -> str:
+        if not self.session:
+            return ''
+        if self.session._local_name(node) == 'affiliation':
+            values = self.session.affiliation_form(node)
+            return '|'.join(f'{key}={value}' for key, value in sorted(values.items()))
+        return ' '.join(self.session._affiliation_label(node).split())
+
     def set_parser_issues(self, linked) -> None:
         """Retain parsing diagnostics alongside their author/affiliation targets."""
         from pdf_to_jats.core.jats_generator import JATSGenerator
@@ -584,15 +722,22 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                      if author.id}
         groups = JATSGenerator()._author_groups(Document(
             authors=linked.authors, affiliations=linked.affiliations))
+        signatures = self._parser_issue_targets()
         records = []
         for issue in linked.issues:
+            author_seq = sequences.get(issue.author_id)
+            group_seqs = [str(index) for index, (affiliation, _) in enumerate(groups, 1)
+                          if affiliation is not None and issue.affiliation_id
+                          and affiliation.id == issue.affiliation_id]
+            targets = {key: signatures[key] for key in
+                       ([f'author:{author_seq}'] if author_seq is not None else [])
+                       + [f'group:{seq}' for seq in group_seqs]
+                       if key in signatures}
             records.append({
                 'message': issue.message, 'severity': issue.severity,
-                'author_seq': sequences.get(issue.author_id),
-                'group_seqs': [str(index) for index, (affiliation, _) in enumerate(groups, 1)
-                               if affiliation is not None and issue.affiliation_id
-                               and affiliation.id == issue.affiliation_id],
+                'author_seq': author_seq, 'group_seqs': group_seqs,
                 'correspondence': 'correspond' in issue.message.lower(),
+                'targets': targets,
             })
         record = self._drafts[self._draft_key]
         record['parser_issues'] = records
@@ -600,9 +745,44 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self._refresh()
         self._retain_draft()
 
+    def _prune_parser_issues(self, record) -> None:
+        """Drop parser notes whose authors or affiliations have been corrected."""
+        issues = record.get('parser_issues', [])
+        if not issues:
+            return
+        current = self._parser_issue_targets()
+        kept = []
+        dropped = set()
+        for issue in issues:
+            targets = issue.get('targets')
+            if targets is None:
+                # Notes retained from an older draft lack a baseline signature;
+                # take one now so later corrections can clear them.
+                targets = {}
+                author_seq = issue.get('author_seq')
+                if author_seq is not None:
+                    key = f'author:{author_seq}'
+                    if key in current:
+                        targets[key] = current[key]
+                for seq in issue.get('group_seqs', []):
+                    key = f'group:{seq}'
+                    if key in current:
+                        targets[key] = current[key]
+                issue['targets'] = targets
+            if targets and any(current.get(key) != value for key, value in targets.items()):
+                dropped.add(issue.get('message'))
+            else:
+                kept.append(issue)
+        if not dropped:
+            return
+        record['parser_issues'] = kept
+        record['parser_warnings'] = [message for message in record.get('parser_warnings', [])
+                                     if message not in dropped]
+
     def _show_parser_issues(self) -> None:
         """Show diagnostics at their fields; never insert them into the XML."""
         record = self._drafts.get(self._draft_key, {})
+        self._prune_parser_issues(record)
         issues = record.get('parser_issues', [])
         unmatched = []
         authors = self.session.authors()
@@ -622,7 +802,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 unmatched.append(issue['message'])
         if not issues:
             unmatched.extend(record.get('parser_warnings', []))
-        notice = 'Parser review notes — check against the PDF; notes remain until parsing is rerun.'
+        notice = ('Parser review notes — check against the PDF; '
+                  'notes clear when their author or affiliation is corrected.')
         self.parser_review.setText('\n'.join([notice, *unmatched]) if issues or unmatched else '')
         self.parser_review.setVisible(bool(issues or unmatched))
         for row in range(self.author_list.count()):
@@ -661,11 +842,38 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 item.setForeground(QColor('#dc4444'))
                 self.correspondence_details.insertItem(0, item)
 
+    def _fill_other_titles(self, *, select: int | None = None) -> None:
+        """List every title after the primary one, with its language tag."""
+
+        self.other_title_list.clear()
+        entries = self.session.titles() if self.session is not None else []
+        for index, entry in enumerate(entries[1:], start=1):
+            language = entry.get("language") or "und"
+            text = " ".join(entry.get("text", "").split())
+            item = QListWidgetItem(f"{language}  ·  {text}")
+            item.setData(Qt.UserRole, index)
+            item.setToolTip(
+                f"xml:lang: {entry.get('language') or 'not set'}\n{entry.get('text', '')}"
+            )
+            self.other_title_list.addItem(item)
+        if select is not None and 0 <= select < self.other_title_list.count():
+            self.other_title_list.setCurrentRow(select)
+        self._other_title_selection_changed()
+
+    def _other_title_selection_changed(self) -> None:
+        selected = self.other_title_list.currentRow() >= 0
+        self.edit_other_title_button.setEnabled(selected)
+        self.remove_other_title_button.setEnabled(selected)
+
     def _refresh_fields(self, *, preserve_abstract: bool = False) -> None:
         """Refresh structured controls without replacing either XML editor."""
         if not self.session: return
         s = self.session
         self.title_edit.setPlainText(s.title())
+        self.title_language.blockSignals(True)
+        self.title_language.setCurrentText(s.title_language())
+        self.title_language.blockSignals(False)
+        self._fill_other_titles()
         if not preserve_abstract:
             self.abstract_edit.setPlainText(s.abstract())
         self._highlight_scripts(self.title_edit, s.title_node())
@@ -938,6 +1146,107 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             self._highlight_scripts(self.title_edit, self.session.title_node())
             self.title_edit.blockSignals(False)
 
+    def _title_language_changed(self) -> None:
+        """Apply the editable language code to the primary title."""
+
+        if self._syncing or not self.session:
+            return
+        language = self.title_language.currentText().strip().upper()
+        if language == self.session.title_language():
+            return
+        try:
+            self.session.set_title_language(language)
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            return
+        self._refresh()
+
+    def add_other_title(self) -> None:
+        """Open the title editor for a new translated title."""
+
+        if not self.session:
+            return
+        self._show_title_dialog(
+            None, {"text": "", "language": "UND"}
+        )
+
+    def edit_other_title(self) -> None:
+        """Edit the selected translated title."""
+
+        if not self.session:
+            return
+        item = self.other_title_list.currentItem()
+        index = item.data(Qt.UserRole) if item is not None else None
+        entries = self.session.titles()
+        if not isinstance(index, int) or not 0 < index < len(entries):
+            self.status.setText("Select a translated title to edit")
+            return
+        self._show_title_dialog(index, entries[index])
+
+    def remove_other_title(self) -> None:
+        """Remove the selected translated title from the XML."""
+
+        if not self.session:
+            return
+        item = self.other_title_list.currentItem()
+        index = item.data(Qt.UserRole) if item is not None else None
+        if not isinstance(index, int):
+            self.status.setText("Select a translated title to remove")
+            return
+        try:
+            self.session.remove_title(index)
+        except (IndexError, ValueError) as exc:
+            self.status.setText(str(exc))
+            return
+        self._refresh()
+
+    def _show_title_dialog(self, index: int | None, entry: dict[str, str]) -> None:
+        """Collect a title and its language before writing it to the XML."""
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit title" if index is not None else "Add title")
+        dialog.resize(560, 340)
+        layout = QVBoxLayout(dialog)
+        language = QComboBox()
+        language.setEditable(True)
+        language.addItems(TITLE_LANGUAGES)
+        language.setCurrentText(str(entry.get("language") or "UND"))
+        form = QFormLayout()
+        form.addRow("Language (xml:lang)", language)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("Title text"))
+        editor = QPlainTextEdit()
+        editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        editor.setPlainText(str(entry.get("text") or ""))
+        layout.addWidget(editor, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        editor.setFocus()
+        accepted = dialog.exec() == QDialog.Accepted
+        text = editor.toPlainText().strip()
+        code = language.currentText().strip().upper()
+        dialog.deleteLater()
+        if not accepted:
+            return
+        if not text:
+            QMessageBox.information(self, "Title required", "Enter the title text before saving.")
+            return
+        try:
+            if index is None:
+                self.session.add_title(text, code)
+                new_row = len(self.session.titles()) - 2
+                self._refresh()
+                self.other_title_list.setCurrentRow(new_row)
+            else:
+                self.session.set_title(text, index)
+                self.session.set_title_language(code, index)
+                self._refresh()
+                self.other_title_list.setCurrentRow(index - 1)
+        except (IndexError, ValueError) as exc:
+            self.status.setText(str(exc))
+
     def check_abstract_grammar(self):
         if not self.session:
             return
@@ -1010,6 +1319,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             self._syncing = False
         self._xml_text_baseline = text
         ok, message, line, column = self.session.commit_raw(text)
+        self.validation_list.clear()
         for index in range(self.tabs.count()):
             page = self.tabs.widget(index)
             if page is not self.validation_list:
@@ -1533,31 +1843,76 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         if not self.session or self.keyword_list.currentRow()<0:return
         node=self.session.keywords()[self.keyword_list.currentRow()]; node.getparent().remove(node); self.session.dirty=True; self.session.validation=[]; self._refresh()
 
-    def validate(self) -> None:
-        if not self.session:return
-        issues=self.session.validate(); self.validation_list.clear()
-        for issue in issues: self.validation_list.addItem(f"{issue.severity.upper()}: {issue.message}" + (f" (line {issue.line}, column {issue.column})" if issue.line else ""))
-        errors=sum(i.severity=="error" for i in issues); warnings=sum(i.severity=="warning" for i in issues)
-        status="Invalid" if errors else "Needs review" if warnings else "Valid"
-        source_label = "FILE" if self.session.source_path is not None else "DRAFT IN MEMORY"
-        self.summary.setText(f"{source_label}  {self.session.path.name}  ·  {self.session.path}\nVALIDATION  {status}     AUTHORS  {len(self.session.authors())}     AFFILIATIONS  {len(self.session.affiliations())}     PROFILE  {self.session.profile}")
-        self.status.setText(f"Validation complete · {errors} errors · {warnings} warnings")
+    def select_schema(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(self, "Select trusted local entry XSD", "", "XML Schema (*.xsd)")
+        if not selected:
+            return
+        family, accepted = QInputDialog.getItem(self, "Schema profile", "This schema validates:",
+                                                ["JATS", "ANI"], 1 if self.session and self.session.profile == "ANI" else 0, False)
+        if not accepted:
+            return
+        self.schema_profile = SchemaProfile(Path(selected).name, family, Path(selected))
+        self.schema_label.setText(f"{family}: {selected}")
+        if self.session:
+            self.session.validation = []
+            self.validate()
 
-    def save_copy(self) -> bool:
-        if not self.session:return False
+    def validate(self) -> None:
+        if not self.session:
+            return
+        issues = self.session.validate(self.schema_profile)
+        self.validation_list.clear()
+        for issue in issues:
+            self.validation_list.addItem(f"{issue.severity.upper()}: {issue.message}" +
+                (f" (line {issue.line}, column {issue.column})" if issue.line else ""))
+        result = self.session.validation_result
+        if result is None or result.well_formedness != ValidationStatus.WELL_FORMED:
+            status = "Not well-formed"
+        elif result.schema_status == ValidationStatus.SCHEMA_VALID:
+            status = "Schema-valid for selected profile; review semantic issues"
+        elif result.schema_status == ValidationStatus.SCHEMA_INVALID:
+            status = "Well-formed; schema-invalid"
+        else:
+            status = "Well-formed; schema unavailable ? publisher validation incomplete"
+        source_label = "FILE" if self.session.source_path is not None else "DRAFT IN MEMORY"
+        self.summary.setText(f"{source_label}  {self.session.path.name}  ?  {self.session.path}\nVALIDATION  {status}     AUTHORS  {len(self.session.authors())}     AFFILIATIONS  {len(self.session.affiliations())}     PROFILE  {self.session.profile}")
+        self.status.setText(status)
+
+    def save_validated_copy(self) -> bool:
+        return self.save_copy(mode=ExportMode.VALIDATED)
+
+    def save_copy(self, *, mode: ExportMode = ExportMode.DRAFT) -> bool:
+        if not self.session:
+            return False
         self.validate()
-        if any(issue.severity == "error" for issue in self.session.validation):
-            QMessageBox.warning(self, "XML has errors", "Fix validation errors before exporting a copy.")
+        try:
+            result = self.session.validation_result
+            if result is None:
+                raise ValueError("Fix the raw XML parse error before exporting")
+            result.require_export(mode)
+        except ValueError as exc:
+            QMessageBox.warning(self, "XML export blocked", str(exc))
             self.tabs.setCurrentWidget(self.validation_list)
             return False
-        suggested=self.session.path.with_name(self.session.path.stem+"_corrected.xml")
-        selected,_=QFileDialog.getSaveFileName(self,"Save Corrected XML Copy",str(suggested),"XML files (*.xml)")
-        if not selected:return False
-        dest=Path(selected)
-        if dest.exists() and QMessageBox.question(self,"Replace file?",f"Replace existing file {dest.name}?",QMessageBox.Yes|QMessageBox.No)!=QMessageBox.Yes:return False
-        try:self.session.save_copy(dest)
-        except (OSError,ValueError) as exc:QMessageBox.critical(self,"Save failed",str(exc));return False
+        suggested = self.session.path.with_name(self.session.path.stem + "_corrected.xml")
+        title = "Draft Export ? publisher validation incomplete" if mode == ExportMode.DRAFT else "Validated Export ? selected schema"
+        selected, _ = QFileDialog.getSaveFileName(self, title, str(suggested), "XML files (*.xml)")
+        if not selected:
+            return False
+        dest = Path(selected)
+        if dest.exists() and QMessageBox.question(self, "Replace file?", f"Replace existing file {dest.name}?", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return False
+        try:
+            self.session.save_copy(dest, mode=mode)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return False
         self._retain_draft()
         self._drafts[self._draft_key]["exported_xml"] = self.session.xml_text()
         self._drafts[self._draft_key]["export_path"] = str(dest)
-        QMessageBox.information(self,"Copy saved",f"Corrected XML saved to:\n{dest}"); self.status.setText(f"Saved copy: {dest}"); return True
+        notice = ("Draft exported. Publisher validation is incomplete; review the Validation tab."
+                  if mode == ExportMode.DRAFT else
+                  "Export validated against the selected schema. Additional publisher business rules are not verified.")
+        QMessageBox.information(self, "Copy saved", f"{notice}\n{dest}")
+        self.status.setText(notice)
+        return True

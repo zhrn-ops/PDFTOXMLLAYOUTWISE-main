@@ -55,10 +55,11 @@ from pdf_to_jats.core.inline_script_detector import (
     shift_trimmed_runs,
 )
 from pdf_to_jats.core.pdf_extractor import PDFExtractor
+from pdf_to_jats.core.language import detect_language_code
 from pdf_to_jats.core.rtl_text import text_direction
 from pdf_to_jats.core.paragraph_reconstructor import ParagraphReconstructor
 from pdf_to_jats.core.semantic_classifier import SemanticClassifier
-from pdf_to_jats.core.validator import Validator
+from pdf_to_jats.core.validator import Validator, ValidationError
 from pdf_to_jats.llm.openrouter_client import OpenRouterClient, OpenRouterRateLimitError
 from pdf_to_jats.llm.ollama_client import OllamaClient
 from pdf_to_jats.llm.primary_client import PrimaryLLMClient
@@ -79,6 +80,7 @@ from pdf_to_jats.core.workflow_state import capture_workflow, decode_workflow, S
 from pdf_to_jats.models.block import reading_order_key
 from pdf_to_jats.models.document import (
     Document,
+    DocumentTitle,
     DocumentZone,
     REFINE_ROLES,
     block_matches_segment,
@@ -246,10 +248,18 @@ class MainWindow(QMainWindow):
             message = "Finish Article is still processing; wait for it to complete before closing."
             self._log(message)
             return
+        pdf_thread = getattr(self, "_pdf_load_thread", None)
+        if pdf_thread is not None and pdf_thread.isRunning():
+            event.ignore()
+            message = "PDF is still loading; wait for it to complete before closing."
+            self._log(message)
+            return
         correction = getattr(self, "_xml_correction_window", None)
         if correction is not None and not correction.confirm_close_drafts():
             event.ignore()
             return
+        if hasattr(self, "viewer") and hasattr(self.viewer, "cleanup"):
+            self.viewer.cleanup()
         super().closeEvent(event)
 
     def __init__(self) -> None:
@@ -993,32 +1003,96 @@ class MainWindow(QMainWindow):
     def capture_workflow(self):
         return capture_workflow(self)
 
-    def restore_workflow(self, data):
+    def _workflow_checkpoint(self) -> dict:
+        names = STATE_FIELDS + (
+            'document', '_llm_links_by_segment', '_manual_link_review_segments',
+            '_selected_block_ids', '_selected_zone_ids', '_selected_zone_id',
+            '_undo_stack', '_last_manual_merge', '_redo_manual_merge',
+            '_active_block_move_undo_id', '_active_zone_move_undo_id', '_segment_identity_cache',
+            'current_xml_path', '_generated_xml_paths', '_review_block_ids', '_review_index',
+        )
+        return {
+            'state': {name: getattr(self, name) for name in names if hasattr(self, name)},
+            'viewer': (self.viewer._pdf_path, self.viewer._page_count, list(self.viewer._page_sizes)),
+            'label': self.pdf_filename_label.text(), 'tooltip': self.pdf_filename_label.toolTip(),
+            'page': self.document_stack.currentIndex(), 'toolbar': self.edit_toolbar.isVisible(),
+        }
+
+    def _restore_workflow_checkpoint(self, checkpoint: dict) -> None:
+        # Reinstall original objects before rebuilding widgets; retained edits
+        # and converter undo history survive a failed replacement.
+        for name, value in checkpoint['state'].items():
+            setattr(self, name, value)
+        self._document_generation += 1
+        path, count, sizes = checkpoint['viewer']
+        self.viewer.load_pdf(path or '', page_count=count, page_sizes=sizes)
+        document = self.document
+        self.viewer.set_document_overlays(
+            [asdict(b) for b in document.blocks] if document else [],
+            [asdict(z) for z in document.zones] if document else [])
+        self.pdf_filename_label.setText(checkpoint['label'])
+        self.pdf_filename_label.setToolTip(checkpoint['tooltip'])
+        self.document_stack.setCurrentIndex(checkpoint['page'])
+        self.edit_toolbar.setVisible(checkpoint['toolbar'])
+        if document is not None:
+            self._populate_tree()
+            self._update_html_preview()
+            self._refresh_articles_list()
+        self._refresh_article_buttons()
+
+    def restore_workflow(self, data: dict | None) -> None:
+        clear_document = data is None
+        if data is None:
+            data = {'document': {}, 'state': {
+                '_finished_segment_keys': [], '_deleted_segment_keys': [],
+                '_current_segment_key': None, '_article_draft_keys': {},
+                '_startup_flow': True, '_explicit_number_workflow': True,
+                '_html_preview_merges': [], '_manual_document_author_links': {}}}
         document, links = decode_workflow(data)
         source = document.metadata.get("source_pdf") or document.metadata.get("source_path")
         source_available = bool(source and Path(source).is_file())
+        count, sizes = 0, []
         if source_available:
-            self.viewer.load_pdf(source)
-        self._document_generation += 1
-        self.document = document
-        for name in STATE_FIELDS:
-            if name in data['state']:
-                setattr(self, name, data['state'][name])
-        self._llm_links_by_segment = links
-        self._manual_link_review_segments = set(data.get('manual_links', []))
-        self._selected_block_ids.clear()
-        self._selected_zone_ids.clear()
-        self._selected_zone_id = None
-        self._undo_stack.clear()
-        self._last_manual_merge = self._redo_manual_merge = None
-        self._active_block_move_undo_id = self._active_zone_move_undo_id = None
-        self._invalidate_segment_identity()
-        self.viewer.set_document_overlays([asdict(b) for b in document.blocks], [asdict(z) for z in document.zones])
-        self.pdf_filename_label.setText(f"PDF: {Path(source).name if source else 'Unavailable'}" + ("" if source_available else " — source file missing"))
-        self.pdf_filename_label.setToolTip(str(source))
-        self.document_stack.setCurrentIndex(1 if source_available else 0)
-        self.edit_toolbar.setVisible(source_available)
-        self._refresh_after_article_change()
+            # Parse PDF metadata before mutating any active model or viewer.
+            with fitz.open(source) as pdf:
+                count = pdf.page_count
+                sizes = [(float(page.rect.width), float(page.rect.height)) for page in pdf]
+        checkpoint = self._workflow_checkpoint()
+        try:
+            self._document_generation += 1
+            self.document = document
+            for name in STATE_FIELDS:
+                setattr(self, name, deepcopy(data['state'][name]))
+            self._llm_links_by_segment = links
+            self._manual_link_review_segments = set(data.get('manual_links', []))
+            self._selected_block_ids = set()
+            self._selected_zone_ids = set()
+            self._selected_zone_id = None
+            self._undo_stack = []
+            self._last_manual_merge = self._redo_manual_merge = None
+            self._active_block_move_undo_id = self._active_zone_move_undo_id = None
+            self._invalidate_segment_identity()
+            self.current_xml_path = None
+            self._generated_xml_paths = []
+            self._review_block_ids = []
+            self._review_index = -1
+            self.viewer.load_pdf(source or '', page_count=count, page_sizes=sizes)
+            self.viewer.set_document_overlays([asdict(b) for b in document.blocks], [asdict(z) for z in document.zones])
+            self.pdf_filename_label.setText(f"PDF: {Path(source).name if source else 'Unavailable'}" + ("" if source_available else " - source file missing"))
+            self.pdf_filename_label.setToolTip(str(source or ''))
+            self.document_stack.setCurrentIndex(1 if source_available else 0)
+            self.edit_toolbar.setVisible(source_available)
+            self._refresh_after_article_change()
+            if clear_document:
+                self.document = None
+                self._refresh_startup_ui()
+                self._refresh_article_buttons()
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+            try:
+                self._restore_workflow_checkpoint(checkpoint)
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as redraw_error:
+                raise ValueError(f"Workspace data restored, but the view could not be refreshed: {redraw_error}") from exc
+            raise ValueError(f"Workspace replacement failed; previous workspace restored: {exc}") from exc
 
     @staticmethod
     def _available_xml_path(path: Path) -> Path:
@@ -1132,6 +1206,14 @@ class MainWindow(QMainWindow):
             f"Review {self._review_index + 1}/{len(self._review_block_ids)}: {block_id} ({block.role})"
         )
 
+    def _validate_draft_export(self, path: Path) -> list[ValidationError]:
+        """Keep legacy exports provisional without treating missing schemas as lost output."""
+        result = self.validator.validate_result(path)
+        for issue in result.schema_issues:
+            self._log(f"Draft XML {path.name}: {issue.message}")
+        return [ValidationError(issue.message)
+                for issue in result.syntax_issues + result.semantic_issues]
+
     def run_auto_pipeline(self) -> None:
         """One-click pipeline: current PDF through refine + export with no dialogs."""
 
@@ -1166,12 +1248,12 @@ class MainWindow(QMainWindow):
             output_path = self._available_xml_path(output_dir / filename)
             generated_path = self.generator.generate(segment_document, output_path)
             output_paths.append(generated_path)
-            errors = self.validator.validate(generated_path)
+            errors = self._validate_draft_export(generated_path)
             if errors:
                 for error in errors:
-                    self._log(f"Validation error in {generated_path.name}: {error.message}")
+                    self._log(f"Draft export issue in {generated_path.name}: {error.message}")
             else:
-                self._log(f"XML written to {generated_path}")
+                self._log(f"Draft XML written to {generated_path}; publisher validation is incomplete")
         self.current_xml_path = output_paths[0] if output_paths else None
         self._show_generated_xml(output_paths)
         review_count = len(self._review_block_ids)
@@ -1276,12 +1358,14 @@ class MainWindow(QMainWindow):
         visible_blocks = [block for block in blocks if not self._looks_like_footer_noise(block)]
         title = self._compose_title(visible_blocks)
         title_blocks = self._title_source_blocks(visible_blocks)
+        alternate_titles = self._alternate_title_entries(visible_blocks, title_blocks, title)
         abstract_blocks = sorted(
             (block for block in visible_blocks if block.role == "abstract" and block.text.strip() and not is_abstract_heading(block.text)),
             key=reading_order_key,
         )
         abstract = "\r\n".join(self._sanitize_xml_text(block.text) for block in abstract_blocks)
         metadata = dict(source.metadata)
+        metadata["title_language"] = detect_language_code(title) if title else ""
         metadata["title_script_runs"] = self._script_runs_for_blocks(
             self._raw_script_sources(title_blocks, source.raw_blocks), title
         )
@@ -1295,6 +1379,7 @@ class MainWindow(QMainWindow):
         linked = self.linker.link_from_blocks(author_blocks, affiliation_blocks)
         return Document(
             title=title,
+            alternate_titles=alternate_titles,
             authors=linked.authors,
             corresponding_author=linked.corresponding_author,
             affiliations=linked.affiliations,
@@ -1891,12 +1976,12 @@ class MainWindow(QMainWindow):
         filename = self._article_filename(segment_document, index, 1, always_number=index > 0)
         output_path = output_dir / filename
         generated_path = self.generator.generate(segment_document, output_path)
-        errors = self.validator.validate(generated_path)
+        errors = self._validate_draft_export(generated_path)
         if errors:
             for error in errors:
-                self._log(f"Validation error in {generated_path.name}: {error.message}")
+                self._log(f"Draft export issue in {generated_path.name}: {error.message}")
         else:
-            self._log(f"XML written to {generated_path}")
+            self._log(f"Draft XML written to {generated_path}; publisher validation is incomplete")
         return generated_path
 
     @staticmethod
@@ -2059,7 +2144,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_request_progress, Qt.QueuedConnection)
-        self._pending_article_finish = (dict(segment), key)
+        self._pending_article_finish = (dict(segment), key, self._document_generation)
         worker.finished.connect(self._on_article_finish_worker_complete, Qt.QueuedConnection)
         # QThread objects live on the GUI thread, so an AutoConnection can queue
         # quit() behind the GUI completion callback. Quit the worker event loop
@@ -2081,7 +2166,14 @@ class MainWindow(QMainWindow):
         self._pending_article_finish = None
         if pending is None:
             return
-        segment, key = pending
+        if len(pending) == 3:
+            segment, key, generation = pending
+            if generation != self._document_generation:
+                self._log("Document changed; ignoring finish response for previous document.")
+                self._set_article_finish_busy(False)
+                return
+        else:
+            segment, key = pending
         try:
             self._on_article_finish_complete(segment, key, response, error)
         except Exception as exc:
@@ -2351,11 +2443,11 @@ class MainWindow(QMainWindow):
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             generated_path = self.generator.generate(segment_document, output_path)
-            errors = self.validator.validate(generated_path)
+            errors = self._validate_draft_export(generated_path)
             for error in errors:
-                self._log(f"Validation error in {generated_path.name}: {error.message}")
+                self._log(f"Draft export issue in {generated_path.name}: {error.message}")
             if not errors:
-                self._log(f"XML written to {generated_path}")
+                self._log(f"Draft XML written to {generated_path}; publisher validation is incomplete")
             return generated_path, errors
         if getattr(self, "_prompt_for_article_xml_path", False):
             index_value = segment.get("index")
@@ -2371,11 +2463,11 @@ class MainWindow(QMainWindow):
                 return None, []
             output_path.parent.mkdir(parents=True, exist_ok=True)
             generated_path = self.generator.generate(segment_document, output_path)
-            errors = self.validator.validate(generated_path)
+            errors = self._validate_draft_export(generated_path)
             for error in errors:
-                self._log(f"Validation error in {generated_path.name}: {error.message}")
+                self._log(f"Draft export issue in {generated_path.name}: {error.message}")
             if not errors:
-                self._log(f"XML written to {generated_path}")
+                self._log(f"Draft XML written to {generated_path}; publisher validation is incomplete")
             return generated_path, errors
         output_dir = self.config.generated_xml_dir
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -4028,6 +4120,9 @@ class MainWindow(QMainWindow):
             if block.id not in excluded_ids and not self._looks_like_footer_noise(block)
         ]
         self.document.title = self._compose_title(blocks)
+        self.document.metadata["title_language"] = (
+            detect_language_code(self.document.title) if self.document.title else ""
+        )
         title_blocks = self._title_source_blocks(blocks)
         self.document.metadata["title_script_runs"] = self._script_runs_for_blocks(
             self._raw_script_sources(title_blocks, self.document.raw_blocks), self.document.title
@@ -4184,6 +4279,7 @@ class MainWindow(QMainWindow):
         # The parked detected list is working state, not part of the article.
         metadata.pop(self.DETECTED_SEGMENTS_KEY, None)
         abstract_number = str(metadata["abstract_number"])
+        primary_title_blocks = self._title_source_blocks(blocks)
         title = self._strip_abstract_number_from_title(self._compose_title(blocks), abstract_number)
         title = re.sub(
             r"^\s*\([A-Z][A-Z0-9./-]{1,30}\)\s+",
@@ -4192,9 +4288,11 @@ class MainWindow(QMainWindow):
             count=1,
             flags=re.IGNORECASE,
         ).strip()
+        metadata["title_language"] = detect_language_code(title) if title else ""
         metadata["title_script_runs"] = self._script_runs_for_blocks(
-            self._raw_script_sources(self._title_source_blocks(blocks), source.raw_blocks), title
+            self._raw_script_sources(primary_title_blocks, source.raw_blocks), title
         )
+        alternate_titles = self._alternate_title_entries(blocks, primary_title_blocks, title)
         abstract_blocks = sorted(
             (block for block in blocks if block.role == "abstract" and block.text.strip() and not is_abstract_heading(block.text)),
             key=reading_order_key,
@@ -4215,6 +4313,7 @@ class MainWindow(QMainWindow):
         metadata["link_issues"] = [asdict(issue) for issue in linked.issues]
         return Document(
             title=title,
+            alternate_titles=alternate_titles,
             authors=linked.authors,
             corresponding_author=linked.corresponding_author,
             affiliations=linked.affiliations,
@@ -4418,50 +4517,76 @@ class MainWindow(QMainWindow):
             return "body"
         return max(set(roles), key=roles.count)
 
-    def _compose_title(self, blocks) -> str:
-        """Build the title from blocks the user marked as title."""
-
-        title_blocks = [block for block in blocks if block.role == "title"]
-        if not title_blocks:
-            return ""
-        title_blocks.sort(key=reading_order_key)
-        page1_blocks = [block for block in title_blocks if block.page == 1]
-        candidates = page1_blocks if page1_blocks else title_blocks
-        top = candidates[0]
-        grouped = [top]
-        for block in candidates[1:]:
-            previous = grouped[-1]
+    def _title_groups(self, title_blocks) -> list[list]:
+        """Group adjacent title lines that belong to one printed title."""
+        ordered = sorted(title_blocks, key=reading_order_key)
+        groups: list[list] = []
+        for block in ordered:
+            if not groups:
+                groups.append([block])
+                continue
+            previous = groups[-1][-1]
             # A title reads down one column. Once the stream steps back up the
             # page it has wrapped to the next column, where the following
             # article lives, so the title ends at the previous line.
             if block.page != previous.page or block.y < previous.y:
-                break
+                groups.append([block])
+                continue
             if block.y - (previous.y + previous.height) > max(previous.height, block.height) * 1.6:
-                break
-            grouped.append(block)
-        parts = [self._sanitize_xml_text(block.text).strip() for block in grouped if self._sanitize_xml_text(block.text).strip()]
-        title = " ".join(parts) if parts else self._sanitize_xml_text(top.text)
+                groups.append([block])
+                continue
+            groups[-1].append(block)
+        return groups
+
+    def _title_text(self, blocks) -> str:
+        """Join one title's lines and remove printed article identifiers."""
+        parts = [
+            self._sanitize_xml_text(block.text).strip()
+            for block in blocks
+            if self._sanitize_xml_text(block.text).strip()
+        ]
+        title = " ".join(parts) if parts else self._sanitize_xml_text(blocks[0].text)
         # Conference abstracts commonly prefix the title with an identifier such
         # as "(S100)". Keep it in extraction metadata, not in the article title.
         title = re.sub(r"^\s*\([A-Z][A-Z0-9./-]{1,30}\)\s+", "", title, count=1, flags=re.IGNORECASE).strip()
         return self._strip_abstract_number_from_title(title)
 
+    def _compose_title(self, blocks) -> str:
+        """Build the primary title from blocks the user marked as title."""
+        title_blocks = [block for block in blocks if block.role == "title"]
+        if not title_blocks:
+            return ""
+        groups = self._title_groups(title_blocks)
+        page1_groups = [group for group in groups if group[0].page == 1]
+        return self._title_text((page1_groups or groups)[0])
+
     def _title_source_blocks(self, blocks):
         """Return the same title lines selected by _compose_title."""
-        title_blocks = sorted((block for block in blocks if block.role == "title"), key=reading_order_key)
+        title_blocks = [block for block in blocks if block.role == "title"]
         if not title_blocks:
             return []
-        page1 = [block for block in title_blocks if block.page == 1]
-        candidates = page1 if page1 else title_blocks
-        grouped = [candidates[0]]
-        for block in candidates[1:]:
-            previous = grouped[-1]
-            if block.page != previous.page or block.y < previous.y:
-                break
-            if block.y - (previous.y + previous.height) > max(previous.height, block.height) * 1.6:
-                break
-            grouped.append(block)
-        return grouped
+        groups = self._title_groups(title_blocks)
+        page1_groups = [group for group in groups if group[0].page == 1]
+        return (page1_groups or groups)[0]
+
+    def _alternate_title_entries(self, blocks, primary_blocks, primary_title: str):
+        """Return every other title group in the article as a translation."""
+        primary_ids = {block.id for block in primary_blocks}
+        other_blocks = [
+            block
+            for block in blocks
+            if block.role == "title" and block.id not in primary_ids
+        ]
+        seen = {" ".join(primary_title.split()).casefold()}
+        entries: list[DocumentTitle] = []
+        for group in self._title_groups(other_blocks):
+            text = self._title_text(group)
+            key = " ".join(text.split()).casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            entries.append(DocumentTitle(text=text, language=detect_language_code(text)))
+        return entries
 
     @staticmethod
     def _raw_script_sources(display_blocks, raw_blocks):
@@ -6721,16 +6846,23 @@ class MainWindow(QMainWindow):
         self.metadata_panel.set_merge_details(None)
         self.props.set_role(None)
 
-    def _load_pdf_path(self, path: str) -> None:
+    def _load_pdf_path(self, path: str, wait: bool = False) -> None:
         if self.document is not None and not self._xml_correction_window.confirm_close_drafts('opening another PDF'):
             return
         self._xml_correction_window._retain_draft()
         self._document_generation += 1
         generation = self._document_generation
-        thread = QThread(self)
         worker = _PdfLoadWorker(
             path, self.config.visible_text_only, self.config.visible_text_dark_threshold, generation
         )
+        self._log(f"Opening {path}...")
+        if wait:
+            worker.finished.connect(self._on_pdf_load_complete, Qt.DirectConnection)
+            worker.run()
+            worker.deleteLater()
+            return
+
+        thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_pdf_load_complete, Qt.QueuedConnection)
@@ -6740,7 +6872,6 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._pdf_load_thread = thread
         self._pdf_load_worker = worker
-        self._log(f"Opening {path}...")
         thread.start()
 
     @Slot(int, object, object)

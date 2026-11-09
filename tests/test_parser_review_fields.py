@@ -41,6 +41,49 @@ def test_explicit_corresponding_author_clears_only_fallback_warning(qapp):
         window.deleteLater()
 
 
+def test_parser_notes_clear_when_their_targets_are_corrected(qapp):
+    author = Author(id='author_1', surname='Smith', affiliation_ids=['1'])
+    affiliation = Affiliation(id='1', text='University 1')
+    linked = LinkedAuthors([author], [affiliation], issues=[
+        LinkIssue('warning', 'Review surname', author_id='author_1'),
+        LinkIssue('warning', 'Review organization', affiliation_id='1'),
+    ])
+    xml = JATSGenerator().to_string(Document(authors=[author], affiliations=[affiliation]))
+    window = XmlCorrectionWindow()
+    try:
+        assert window.load_xml_text(xml, Path('clear-review.xml'))
+        key = window._draft_key
+        window.set_parser_issues(linked)
+        heading = next(window.author_list.item(i) for i in range(window.author_list.count())
+                       if window.author_list.item(i).data(Qt.UserRole + 2))
+        assert 'Review surname' in heading.text()
+        assert heading.background().color().name() == '#54252b'
+
+        values = window.session.author_form(0)
+        values['surname'] = 'Jones'
+        assert window.session.set_author_form(0, values)
+        window._refresh()
+        assert [issue['message'] for issue in window._drafts[key]['parser_issues']] == [
+            'Review organization']
+        assert 'Review surname' not in window._drafts[key]['parser_warnings']
+
+        node = window.session.affiliation_groups()[0][2][0]
+        values = window.session.affiliation_form(node)
+        values['organization'] = 'University 2'
+        assert window.session.set_affiliation_form(node, values)
+        window._refresh()
+        assert window._drafts[key]['parser_issues'] == []
+        assert window._drafts[key]['parser_warnings'] == []
+        assert window.parser_review.isHidden()
+        for index in range(window.author_list.count()):
+            item = window.author_list.item(index)
+            assert 'Review:' not in item.text()
+            assert item.background().style() == Qt.NoBrush
+    finally:
+        window.session.dirty = False
+        window.close()
+
+
 def test_parser_notes_target_groups_and_survive_draft_switch(qapp):
     authors = [Author(id='author_1', surname='Smith', affiliation_ids=['1', '2']),
                Author(id='author_2', surname='Jones', affiliation_ids=['3'])]

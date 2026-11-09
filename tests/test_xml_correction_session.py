@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pdf_to_jats.core.xml_correction import XmlDocumentSession
+from pdf_to_jats.core.xml_correction import ANI_CE_NS, XmlDocumentSession
 
 
 JATS = b'''<?xml version="1.0" encoding="UTF-8"?>
@@ -111,6 +111,49 @@ def test_jats_groups_follow_explicit_references(tmp_path):
     assert session.author_affiliation_groups() == [
         ('University A', [0]), ('University B', [0]), ('No affiliation linked', [1])
     ]
+
+
+def _ani_abstract(inner: str) -> str:
+    return (
+        '<units xmlns="http://www.elsevier.com/xml/ani/ani" '
+        'xmlns:ce="http://www.elsevier.com/xml/ani/common"><abstracts><abstract>'
+        + inner
+        + '</abstract></abstracts></units>'
+    )
+
+
+def test_pasted_line_wraps_stay_in_one_abstract_paragraph(tmp_path):
+    session = XmlDocumentSession.from_text(
+        _ani_abstract('<ce:para>Old</ce:para>'), tmp_path / 'draft.xml'
+    )
+    session.set_abstract(
+        'Background: first printed line\n continues on the next line.\n'
+        'Still the same paragraph.\n\nSecond paragraph\nwith its own wrap.'
+    )
+
+    assert [paragraph.text for paragraph in session.abstract_node()] == [
+        'Background: first printed line continues on the next line. '
+        'Still the same paragraph.',
+        'Second paragraph with its own wrap.',
+    ]
+    assert session.abstract() == (
+        'Background: first printed line continues on the next line. '
+        'Still the same paragraph.\n\nSecond paragraph with its own wrap.'
+    )
+
+
+def test_reflowed_abstract_keeps_inline_scripts(tmp_path):
+    session = XmlDocumentSession.from_text(
+        _ani_abstract('<ce:para>Dose cm<ce:sup>2</ce:sup> here.</ce:para>'),
+        tmp_path / 'draft.xml',
+    )
+    session.set_abstract('Dose cm2\nhere. Next line.')
+
+    paragraph = next(iter(session.abstract_node()))
+    sup = paragraph.find(f'{{{ANI_CE_NS}}}sup')
+    assert paragraph.text == 'Dose cm'
+    assert sup is not None and sup.text == '2'
+    assert sup.tail == ' here. Next line.'
 
 
 def test_parser_does_not_resolve_external_entities(tmp_path):

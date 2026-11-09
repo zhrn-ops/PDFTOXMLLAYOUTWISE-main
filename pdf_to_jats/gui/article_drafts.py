@@ -1,14 +1,17 @@
 """Retained XML article drafts and portable review-workspace files."""
 from pathlib import Path
+from copy import deepcopy
+import fitz
 from lxml import etree
 import difflib
 import json
-import os
-import tempfile
 
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QDialog, QVBoxLayout, QPlainTextEdit, QDialogButtonBox
 from pdf_to_jats.core.xml_correction import XmlDocumentSession
-from pdf_to_jats.core.workflow_state import decode_workflow
+from pdf_to_jats.core.atomic_io import atomic_write_bytes
+from pdf_to_jats.core.draft_workspace import canonical_history, session_from_record, stage_workspace
+from pdf_to_jats.core.xml_revisions import XmlRevision
+from pdf_to_jats.core.xml_validation import unicode_xml_bytes
 
 
 class ArticleDrafts:
@@ -18,7 +21,7 @@ class ArticleDrafts:
         if text is None:
             return None
         try:
-            root = etree.fromstring(text.encode('utf-8'), etree.XMLParser(
+            root = etree.fromstring(unicode_xml_bytes(text), etree.XMLParser(
                 resolve_entities=False, no_network=True, load_dtd=False))
         except (ValueError, etree.XMLSyntaxError):
             return text
@@ -41,12 +44,18 @@ class ArticleDrafts:
         if self._draft_key is None:
             self._draft_key = 'file:' + str(self.session.path.resolve())
         previous = self._drafts.get(self._draft_key, {})
+        self._record_history()
         self._drafts[self._draft_key] = dict(
             previous, xml=self.session.xml_text(), raw=(getattr(self, '_unparsed_text', self.raw.toPlainText()) if not self.session.raw_valid else self.raw.toPlainText()),
             path=str(self.session.path), source=str(self.session.source_path or ''),
             pdf=str(self.pdf_preview_path or ''), dirty=self.session.dirty,
             history=list(getattr(self, '_history', [self.session.xml_text()])),
             history_index=getattr(self, '_history_index', 0),
+            current_revision=XmlRevision(self.session.xml_bytes()).to_record(),
+            source_revision=XmlRevision(self.session.source_bytes).to_record(),
+            saved_revision=XmlRevision(self.session.original_bytes).to_record(),
+            last_validated=deepcopy(self.session.last_validated),
+            last_export=deepcopy(self.session.last_export),
         )
         self._update_draft_selector()
 
@@ -68,12 +77,13 @@ class ArticleDrafts:
         if key not in self._drafts:
             return False
         record = self._drafts[key]
-        session = XmlDocumentSession.from_text(record['xml'], Path(record['path']))
-        session.source_path = Path(record['source']) if record.get('source') else None
+        session = session_from_record(record)
+        self.set_pdf_source(Path(record['pdf']) if record.get('pdf') else None)
         self.session = session
         self._draft_key = key
         self._history_session = session
-        self._history = record.get('history', [record['xml']])
+        self._history = [canonical_history(text, session.path)
+                         for text in record.get('history', [record['xml']])]
         self._history_index = record.get('history_index', len(self._history) - 1)
         self._refresh()
         if record.get('raw', record['xml']) != record['xml']:
@@ -81,8 +91,11 @@ class ArticleDrafts:
             # comment it already holds is not treated as a newly added one.
             self._xml_text_baseline = record['raw']
             self.raw.setPlainText(record['raw'])
+            valid, _, _, _ = session.commit_raw(record['raw'])
+            if not valid:
+                session.raw_valid = False
+                self._unparsed_text = record['raw']
         session.dirty = record.get('dirty', False)
-        self.set_pdf_source(Path(record['pdf']) if record.get('pdf') else None)
         self._update_draft_selector()
         self._draft_status()
         return True
@@ -120,18 +133,11 @@ class ArticleDrafts:
                     QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
                 return False
         text = self._workspace_text()
-        temporary = None
         try:
-            fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.draft-', suffix='.tmp')
-            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-                stream.write(text)
-            os.replace(temporary, path)
+            atomic_write_bytes(path, text.encode('utf-8'))
         except OSError as exc:
             QMessageBox.warning(self, 'Draft save failed', str(exc))
             return False
-        finally:
-            if temporary and os.path.exists(temporary):
-                os.unlink(temporary)
         self._draft_file = path
         self._saved_workspace = text
         self.status.setText(f'Drafts saved: {path.name}')
@@ -168,48 +174,69 @@ class ArticleDrafts:
         if not selected:
             return
         try:
-            data = json.loads(Path(selected).read_text(encoding='utf-8'))
-            if (data['version'] != 1 or not isinstance(data['articles'], dict)
-                    or (data['active'] is not None and data['active'] not in data['articles'])
-                    or (not data['articles'] and not data.get('workflow'))):
-                raise ValueError('Unsupported or empty article draft file')
-            for record in data['articles'].values():
-                XmlDocumentSession.from_text(record['xml'], Path(record['path']))
-                if not isinstance(record.get('raw', ''), str):
-                    raise ValueError('Invalid draft text')
-                history = record.get('history', [record['xml']])
-                index = record.get('history_index', len(history) - 1)
-                if not history or not isinstance(index, int) or not 0 <= index < len(history):
-                    raise ValueError('Invalid draft history')
-                for revision in history:
-                    XmlDocumentSession.from_text(revision, Path(record['path']))
+            data = stage_workspace(json.loads(Path(selected).read_text(encoding='utf-8')))
+            # Open all referenced, available PDFs before replacing live state.
+            # Missing PDFs remain recoverable as XML-only workspaces.
+            sources = {record.get('pdf') for record in data['articles'].values() if record.get('pdf')}
             if data.get('workflow'):
-                decode_workflow(data['workflow'])
-        except (OSError, ValueError, KeyError, TypeError, etree.XMLSyntaxError) as exc:
+                metadata = data['workflow']['document'].get('metadata', {})
+                sources.add(metadata.get('source_pdf') or metadata.get('source_path'))
+            for source in sources:
+                if source and Path(source).is_file():
+                    with fitz.open(source) as pdf:
+                        if pdf.page_count:
+                            pdf.load_page(0).get_text('text')
+        except (OSError, ValueError, KeyError, TypeError, etree.XMLSyntaxError, fitz.FileDataError) as exc:
             QMessageBox.warning(self, 'Could not open drafts', str(exc))
             return
         if not self.confirm_close_drafts('opening another workspace'):
             return
-        if data.get('workflow') and hasattr(main, 'restore_workflow'):
-            try:
-                main.restore_workflow(data['workflow'])
-            except (OSError, ValueError) as exc:
-                QMessageBox.warning(self, 'Could not restore PDF workspace', str(exc))
-                return
-        self.session = None
-        self._drafts = data['articles']
-        self._draft_key = None
-        if data['active'] is not None:
-            self.activate_draft(data['active'])
-        else:
-            self._syncing = True
-            for editor in (self.title_edit, self.abstract_edit, self.raw, self.preview):
-                editor.clear()
+        checkpoint = {name: getattr(self, name, None) for name in (
+            'session', '_drafts', '_draft_key', '_draft_file', '_saved_workspace',
+            '_workflow_snapshot', '_history', '_history_index', '_history_session')}
+        old_raw = self.raw.toPlainText()
+        old_pdf = self.pdf_preview_path
+        workflow_checkpoint = main._workflow_checkpoint() if hasattr(main, '_workflow_checkpoint') else None
+        try:
+            if hasattr(main, 'restore_workflow'):
+                main.restore_workflow(data.get('workflow'))
+            self.session = None
+            self._drafts = data['articles']
+            self._draft_key = None
+            if data['active'] is not None:
+                self.activate_draft(data['active'])
+            else:
+                self._syncing = True
+                for editor in (self.title_edit, self.abstract_edit, self.raw, self.preview):
+                    editor.clear()
+                self._syncing = False
+                self.set_pdf_source(None)
+                self.validation_list.clear()
+                self._update_draft_selector()
+            self._draft_file = Path(selected)
+            self._workflow_snapshot = data.get('workflow')
+            self._saved_workspace = self._workspace_text()
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
             self._syncing = False
-            self._update_draft_selector()
-        self._draft_file = Path(selected)
-        self._workflow_snapshot = data.get('workflow')
-        self._saved_workspace = self._workspace_text()
+            for name, value in checkpoint.items():
+                setattr(self, name, value)
+            try:
+                if workflow_checkpoint is not None:
+                    main._restore_workflow_checkpoint(workflow_checkpoint)
+                self.set_pdf_source(old_pdf)
+                if self.session:
+                    self._refresh()
+                    if old_raw != self.session.xml_text():
+                        self._xml_text_baseline = old_raw
+                        self.raw.setPlainText(old_raw)
+                self._update_draft_selector()
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as redraw_error:
+                QMessageBox.warning(self, 'Workspace data retained',
+                    f'Replacement failed: {exc}. The old data is retained, but its view could not refresh: {redraw_error}')
+                return
+            QMessageBox.warning(self, 'Could not open drafts',
+                                f'Previous workspace restored: {exc}')
+            return
         if hasattr(main, 'pages'):
             main.pages.setCurrentWidget(self if self.session else main.converter_page)
             main.convert_step_btn.setChecked(self.session is None)

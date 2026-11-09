@@ -699,6 +699,18 @@ class PDFViewer(QWidget):
             self._page_render_workers[thread] = worker
             thread.start()
 
+    def cleanup(self) -> None:
+        """Cancel and wait for in-flight raster threads before viewer destruction."""
+        self._generation += 1
+        self._pending_page_renders.clear()
+        self._queued_page_renders.clear()
+        for thread in list(self._page_render_threads):
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(200)
+        self._page_render_threads.clear()
+        self._page_render_workers.clear()
+
     def _forget_page_render(self, thread: QThread) -> None:
         if thread in self._page_render_threads:
             self._page_render_threads.remove(thread)
@@ -760,9 +772,7 @@ class PDFViewer(QWidget):
         preview: tuple[int, int, int, bytes] | None = None,
         *, page_count: int | None = None, page_sizes: list[tuple[float, float]] | None = None,
     ) -> None:
-        self._generation += 1
-        self._pdf_path = Path(pdf_path)
-        self._select_pdf_text(-1, [])
+        candidate_path = Path(pdf_path)
         # Compatibility for existing callers; the viewer keeps only detached
         # metadata, never a live PyMuPDF document handle.
         if document is not None:
@@ -770,9 +780,12 @@ class PDFViewer(QWidget):
             page_sizes = [(float(p.rect.width), float(p.rect.height)) for p in document]
             document.close()
         if page_count is None or page_sizes is None:
-            with fitz.open(self._pdf_path) as opened:
+            with fitz.open(candidate_path) as opened:
                 page_count = opened.page_count
                 page_sizes = [(float(p.rect.width), float(p.rect.height)) for p in opened]
+        self._generation += 1
+        self._pdf_path = candidate_path
+        self._select_pdf_text(-1, [])
         self._page_count = page_count
         self._page_sizes = page_sizes
         self._page_index = 0

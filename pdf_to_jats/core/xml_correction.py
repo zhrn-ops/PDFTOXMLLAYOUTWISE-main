@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from copy import deepcopy
 from pathlib import Path
-import os
-import tempfile
+import re
 
 from lxml import etree
+from pdf_to_jats.core.atomic_io import atomic_write_bytes
+from pdf_to_jats.core.xml_revisions import XmlRevision, validation_record
+from pdf_to_jats.core.xml_validation import (
+    ExportMode, SchemaProfile, ValidationResult, ValidationStatus,
+    ValidationIssue, fingerprint, unicode_xml_bytes, validate_xml,
+)
 from pdf_to_jats.core.inline_script_detector import (
     join_text_and_runs,
     normalize_inline_runs,
@@ -16,6 +21,44 @@ from pdf_to_jats.core.inline_script_detector import (
 )
 
 ANI_CE_NS = "http://www.elsevier.com/xml/ani/common"
+
+_PARAGRAPH_BREAK = re.compile(r"[ \t]*(?:\r?\n[ \t]*){2,}")
+
+
+def reflow_abstract_paragraphs(value: str) -> list[tuple[str, list[int]]]:
+    """Split abstract text into paragraphs, unwrapping pasted source line breaks.
+
+    Text copied out of a PDF keeps a hard line break at every printed line, so
+    only a blank line starts a new paragraph here. A single line break is a
+    soft wrap and becomes a space. Each paragraph carries the source offset of
+    every kept character so inline scripts can be remapped.
+    """
+
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for match in _PARAGRAPH_BREAK.finditer(value):
+        bounds.append((start, match.start()))
+        start = match.end()
+    bounds.append((start, len(value)))
+
+    paragraphs: list[tuple[str, list[int]]] = []
+    for start, end in bounds:
+        text: list[str] = []
+        offsets: list[int] = []
+        pending_space = False
+        for index in range(start, end):
+            char = value[index]
+            if char.isspace():
+                pending_space = bool(text)
+                continue
+            if pending_space:
+                text.append(" ")
+                offsets.append(index)
+                pending_space = False
+            text.append(char)
+            offsets.append(index)
+        paragraphs.append(("".join(text), offsets))
+    return paragraphs
 
 
 def normalize_organization(value: str) -> str:
@@ -45,6 +88,8 @@ class XmlDocumentSession:
         self.path = path
         self.source_path = source_path
         self.source_bytes = source
+        self.last_validated: dict | None = None
+        self.last_export: dict | None = None
         self.parser = etree.XMLParser(resolve_entities=False, no_network=True,
                                       load_dtd=False, recover=False, remove_blank_text=False)
         self.tree = etree.ElementTree(etree.fromstring(source, self.parser))
@@ -52,6 +97,7 @@ class XmlDocumentSession:
         self.encoding = self.tree.docinfo.encoding or "UTF-8"
         self.xml_declaration = self.tree.docinfo.xml_version
         self.dirty = False
+        self._validation_result: ValidationResult | None = None
         self.validation: list[Issue] = []
         self.raw_valid = True
         self.profile = self._profile()
@@ -63,8 +109,17 @@ class XmlDocumentSession:
     @classmethod
     def from_text(cls, text: str, label_path: Path) -> "XmlDocumentSession":
         """Create a correction session for XML that has not been saved yet."""
-
-        return cls(label_path, text.encode("utf-8"))
+        match = re.match(r'^\ufeff?<\?xml\s[^?]*?encoding\s*=\s*([\"\'])(.*?)\1', text)
+        declared = match.group(2).strip() if match else None
+        data = None
+        if declared:
+            try:
+                data = text.encode(declared)
+            except (LookupError, UnicodeEncodeError):
+                data = None
+        if data is None:
+            data = unicode_xml_bytes(text)
+        return cls(label_path, data)
 
     def _profile(self) -> str:
         root = self.tree.getroot()
@@ -99,14 +154,83 @@ class XmlDocumentSession:
                 return node
         return None
 
-    def title_node(self):
-        return self._find(("titletext", "article-title"))
+    @staticmethod
+    def _xml_lang_attr() -> str:
+        return "{http://www.w3.org/XML/1998/namespace}lang"
+
+    def _title_container(self):
+        """Return the element that owns this profile's article titles."""
+
+        local_root = etree.QName(self.tree.getroot()).localname
+        wanted = "title-group" if local_root == "article" else "citation-title"
+        for node in self.tree.iter():
+            if self._local_name(node) == wanted:
+                return node
+        return None
+
+    def title_nodes(self):
+        """Return every article title in document order.
+
+        Titles are only read from the profile's canonical container so a
+        reference or a table caption can never be mistaken for a second title.
+        """
+
+        container = self._title_container()
+        if container is not None:
+            if self._local_name(container) == "title-group":
+                # JATS stores translations in trans-title-group/trans-title,
+                # while the primary title is a direct article-title child.
+                nodes = []
+                for child in container:
+                    local = self._local_name(child)
+                    if local in {"article-title", "trans-title"}:
+                        nodes.append(child)
+                    elif local == "trans-title-group":
+                        nodes.extend(
+                            grand for grand in child
+                            if self._local_name(grand) == "trans-title"
+                        )
+                if nodes:
+                    return nodes
+            else:
+                nodes = [child for child in container if self._local_name(child) == "titletext"]
+                if nodes:
+                    return nodes
+        node = self._find(("titletext", "article-title", "trans-title"))
+        return [node] if node is not None else []
+
+    def title_node(self, index: int = 0):
+        nodes = self.title_nodes()
+        return nodes[index] if 0 <= index < len(nodes) else None
+
+    def titles(self) -> list[dict[str, str]]:
+        """Describe each title's text and language for the correction UI."""
+
+        entries = []
+        for index, node in enumerate(self.title_nodes()):
+            entries.append({
+                "text": " ".join("".join(node.itertext()).split()),
+                "language": self.title_language(index),
+                "original": node.get("original", ""),
+            })
+        return entries
+
+    def title_language(self, index: int = 0) -> str:
+        node = self.title_node(index)
+        if node is None:
+            return ""
+        language = node.get(self._xml_lang_attr(), "")
+        if not language and self._local_name(node) == "trans-title":
+            group = node.getparent()
+            if group is not None and self._local_name(group) == "trans-title-group":
+                language = group.get(self._xml_lang_attr(), "")
+        return language
 
     def abstract_node(self):
         return self._find(("abstract", "abstracts"))
 
-    def title(self) -> str:
-        node = self.title_node()
+    def title(self, index: int = 0) -> str:
+        node = self.title_node(index)
         return "" if node is None else " ".join("".join(node.itertext()).split())
 
     def abstract(self) -> str:
@@ -608,11 +732,92 @@ class XmlDocumentSession:
         self.dirty = True
         self.validation = []
 
-    def set_title(self, value: str) -> None:
-        node = self.title_node()
+    def set_title(self, value: str, index: int = 0) -> None:
+        node = self.title_node(index)
         if node is None:
             raise ValueError("This XML profile has no safely mapped title element")
         self._set_text(node, value, preserve_scripts=True)
+
+    def set_title_language(self, value: str, index: int = 0) -> None:
+        """Write the BCP-47 code used as ``xml:lang`` on a title."""
+
+        node = self.title_node(index)
+        if node is None:
+            raise ValueError("This XML profile has no safely mapped title element")
+        language = str(value or "").strip()
+        attribute = self._xml_lang_attr()
+        if language == self.title_language(index):
+            return
+        target = node
+        if self._local_name(node) == "trans-title":
+            group = node.getparent()
+            if group is not None and self._local_name(group) == "trans-title-group":
+                target = group
+        if language:
+            target.set(attribute, language)
+        else:
+            target.attrib.pop(attribute, None)
+        if target is not node:
+            # The title element must not keep an older language that would
+            # override the group it now belongs to.
+            node.attrib.pop(attribute, None)
+        self.dirty = True
+        self.validation = []
+
+    def add_title(self, value: str, language: str = "") -> None:
+        """Append a translated title next to the existing article title."""
+
+        container = self._title_container()
+        if container is None:
+            raise ValueError("This XML profile has no safely mapped title container")
+        namespace = etree.QName(container).namespace
+        qname = lambda local: f"{{{namespace}}}{local}" if namespace else local
+        jats = self._local_name(container) == "title-group"
+        parent = container
+        if jats:
+            parent = etree.SubElement(container, qname("trans-title-group"))
+            if language.strip():
+                parent.set(self._xml_lang_attr(), language.strip())
+            node = etree.SubElement(parent, qname("trans-title"))
+        else:
+            node = etree.SubElement(container, qname("titletext"))
+            if language.strip():
+                node.set(self._xml_lang_attr(), language.strip())
+            node.set("original", "n")
+        # The previous title's tail is the container's indentation; reuse it so
+        # a newly inserted sibling looks like the titles that were already there.
+        sibling = parent[-2] if len(parent) > 1 else None
+        if sibling is not None:
+            tail = sibling.tail
+            (parent if jats else node).tail = tail if tail and not tail.strip() else "\n"
+        elif jats:
+            parent.tail = "\n"
+        self._set_text(node, value)
+
+    def remove_title(self, index: int = 0) -> None:
+        """Remove one translated title, never the last remaining title."""
+
+        nodes = self.title_nodes()
+        if len(nodes) <= 1:
+            raise ValueError("At least one article title must remain")
+        if not 0 <= index < len(nodes):
+            raise IndexError("Title index out of range")
+        node = nodes[index]
+        target = node
+        parent = node.getparent()
+        if (self._local_name(node) == "trans-title" and parent is not None
+                and self._local_name(parent) == "trans-title-group"):
+            # Remove the wrapper with its only translation; keep it if the
+            # source XML grouped several translated title parts together.
+            if len([child for child in parent
+                    if self._local_name(child) in {"trans-title", "trans-subtitle"}]) == 1:
+                target = parent
+        owner = target.getparent()
+        if owner is None:
+            raise ValueError("This title cannot be removed safely")
+        owner.remove(target)
+        self.dirty = True
+        self.validation = []
 
     def set_abstract(self, value: str) -> None:
         node = self.abstract_node()
@@ -635,21 +840,30 @@ class XmlDocumentSession:
             for child in list(node):
                 node.remove(child)
             node.text = None
-            lines = value.splitlines(keepends=True) or [value]
-            offset = 0
-            for line_with_ending in lines:
-                line = line_with_ending.rstrip("\r\n")
+            # A blank line separates real paragraphs; single line breaks from
+            # pasted PDF text are wraps inside the same paragraph.
+            paragraphs = [p for p in reflow_abstract_paragraphs(value) if p[0]] or [("", [])]
+            for text, positions in paragraphs:
                 paragraph = etree.SubElement(node, paragraph_tag)
-                line_runs = []
-                line_end = offset + len(line)
+                paragraph_runs = []
                 for run in mapped_runs:
-                    if offset <= int(run["start"]) and int(run["end"]) <= line_end:
-                        item = dict(run)
-                        item["start"] = int(run["start"]) - offset
-                        item["end"] = int(run["end"]) - offset
-                        line_runs.append(item)
-                self._write_scripted_text(paragraph, line, line_runs)
-                offset += len(line_with_ending)
+                    run_start, run_end = int(run["start"]), int(run["end"])
+                    start_index = next(
+                        (index for index, position in enumerate(positions) if position >= run_start),
+                        None,
+                    )
+                    end_index = next(
+                        (index for index, position in enumerate(positions) if position >= run_end),
+                        len(positions),
+                    )
+                    if start_index is None or start_index >= end_index:
+                        continue
+                    item = dict(run)
+                    item["start"] = start_index
+                    item["end"] = end_index
+                    item["text"] = text[start_index:end_index]
+                    paragraph_runs.append(item)
+                self._write_scripted_text(paragraph, text, paragraph_runs)
         self.dirty = True
         self.validation = []
 
@@ -1024,53 +1238,100 @@ class XmlDocumentSession:
     def commit_raw(self, text: str) -> tuple[bool, str | None, int | None, int | None]:
         try:
             parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, recover=False, remove_blank_text=False)
-            candidate = etree.fromstring(text.encode(self.encoding), parser)
+            match = re.match(r'^\ufeff?<\?xml\s[^?]*?encoding\s*=\s*([\"\'])(.*?)\1', text)
+            declared = match.group(2).strip() if match else None
+            data = None
+            encoding = "UTF-8"
+            if declared:
+                try:
+                    data = text.encode(declared)
+                    encoding = declared
+                except (LookupError, UnicodeEncodeError):
+                    data = None
+            if data is None:
+                data = unicode_xml_bytes(text)
+                encoding = "UTF-8"
+            candidate = etree.fromstring(data, parser)
             self.tree = etree.ElementTree(candidate)
+            self.encoding = encoding
             self.profile = self._profile()
             self.dirty = etree.tostring(self.tree, encoding=self.encoding, xml_declaration=True) != self.original_bytes
             self.validation = []
             self.raw_valid = True
             return True, None, None, None
-        except etree.XMLSyntaxError as exc:
+        except (etree.XMLSyntaxError, UnicodeError, ValueError) as exc:
             self.validation = []
             self.raw_valid = False
-            entry = exc.error_log.last_error
+            entry = exc.error_log.last_error if isinstance(exc, etree.XMLSyntaxError) else None
             return False, str(exc), entry.line if entry else None, entry.column if entry else None
 
-    def xml_text(self) -> str:
-        tree = deepcopy(self.tree)
+    @property
+    def validation(self) -> list[Issue]:
+        return self._validation
 
+    @validation.setter
+    def validation(self, issues: list[Issue]) -> None:
+        self._validation = issues
+        self._validation_result = None
+
+    @property
+    def validation_result(self) -> ValidationResult | None:
+        result = self._validation_result
+        if result is not None and (not self.raw_valid or result.fingerprint != fingerprint(self.xml_bytes())):
+            self._validation_result = None
+            self._validation = []
+            return None
+        return result
+
+    def xml_bytes(self) -> bytes:
+        tree = deepcopy(self.tree)
+        # Only known structural containers get display indentation. Inline and
+        # unknown elements keep exact text/tails, including adjacent formulas.
+        containers = {"article", "front", "article-meta", "title-group", "contrib-group",
+                      "contrib", "name", "kwd-group", "units", "unit", "unit-info",
+                      "unit-content", "bibrecord", "head", "citation-info", "citation-title",
+                      "author-group", "author", "affiliation", "abstracts", "body"}
         def separate_elements(node):
             if not isinstance(node.tag, str) or not len(node):
                 return
             if node.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve':
                 return
-            # Inline text must retain its exact spacing and markup.
+            name = etree.QName(node).localname
+            paragraph_container = name == "abstract" and all(
+                isinstance(child.tag, str) and etree.QName(child).localname in {"p", "para"}
+                for child in node)
+            # Older metadata imports use a neutral root around ANI fields.
+            metadata_wrapper = name == "root" and all(
+                isinstance(child.tag, str) and etree.QName(child).localname in {"affiliation", "author-group"}
+                for child in node)
+            if name not in containers and not paragraph_container and not metadata_wrapper:
+                return
             if (node.text or '').strip() or any((child.tail or '').strip() for child in node):
                 return
             node.text = '\n'
             for child in node:
                 separate_elements(child)
                 child.tail = '\n'
-
         separate_elements(tree.getroot())
-        return etree.tostring(tree, encoding=self.encoding, xml_declaration=True).decode(self.encoding)
+        return etree.tostring(tree, encoding=self.encoding, xml_declaration=True)
 
-    def validate(self) -> list[Issue]:
+    def xml_text(self) -> str:
+        return self.xml_bytes().decode(self.encoding)
+
+    def validate(self, profile: SchemaProfile | None = None) -> list[Issue]:
         if not self.raw_valid:
             self.validation = [Issue("error", "The raw XML editor contains unparsed changes")]
             return self.validation
-        issues: list[Issue] = []
-        try:
-            etree.fromstring(etree.tostring(self.tree), etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, recover=False))
-            issues.append(Issue("info", "XML is well-formed"))
-        except etree.XMLSyntaxError as exc:
-            e = exc.error_log.last_error
-            return [Issue("error", str(exc), e.line if e else None, e.column if e else None)]
+        result = validate_xml(self.xml_bytes(), profile)
+        issues = [Issue(i.severity, i.message, i.line, i.column, i.field)
+                  for i in result.syntax_issues + result.schema_issues]
+        if result.well_formedness == ValidationStatus.WELL_FORMED:
+            issues.insert(0, Issue("info", "XML is well-formed"))
+        if result.schema_status == ValidationStatus.SCHEMA_VALID:
+            issues.append(Issue("info", f"Schema-valid against selected profile: {profile.name}. Additional publisher business rules are not verified."))
         if self.profile == "Unknown":
             issues.append(Issue("warning", "Document profile is unknown; structured mappings are limited"))
-        else:
-            issues.append(Issue("info", f"Schema validation unavailable: no trusted local {self.profile} XSD is installed"))
+        semantic_start = len(issues)
         if not self.title().strip():
             issues.append(Issue("warning", "Missing or empty title", field="title"))
         if not self.authors():
@@ -1089,28 +1350,34 @@ class XmlDocumentSession:
             if self.tree.xpath('//ani:itemid[@idtype="ABSN" and text()="ABSN"]', namespaces=namespace):
                 issues.append(Issue("warning", "Article number uses the workflow placeholder ABSN; confirm whether a real identifier is required."))
         self.validation = issues
+        self._validation_result = replace(result, semantic_issues=tuple(
+            ValidationIssue(i.severity, i.message, i.line, i.column, i.field)
+            for i in issues[semantic_start:]))
+        self.last_validated = validation_record(self.xml_bytes(), self._validation_result)
         return issues
 
-    def save_copy(self, destination: Path) -> None:
+    def save_copy(self, destination: Path, *, mode: ExportMode = ExportMode.DRAFT, encoding: str | None = None) -> None:
         if self.source_path is not None and destination.resolve() == self.source_path.resolve():
             raise ValueError("Save Copy cannot overwrite the source XML")
-        if not self.validation:
+        result = self.validation_result
+        if not self.validation or result is None:
             raise ValueError("Validate the current XML before exporting a copy")
         if not self.raw_valid:
             raise ValueError("Fix the raw XML parse error before exporting a copy")
-        if any(issue.severity == "error" for issue in self.validation):
-            raise ValueError("Fix XML validation errors before exporting a copy")
-        data = self.xml_text().encode(self.encoding)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp_name, destination)
-        finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+        if encoding:
+            tree = deepcopy(self.tree)
+            data = etree.tostring(tree, encoding=encoding, xml_declaration=True)
+        else:
+            data = self.xml_bytes()
+        # Recheck schema resources at strict export: selected files may have
+        # changed or disappeared since the user pressed Validate.
+        if ExportMode(mode) == ExportMode.VALIDATED:
+            self.validate(result.profile)
+            result = self.validation_result
+        result.require_export(mode)
+        atomic_write_bytes(destination, data)
+        self.last_export = {"revision": XmlRevision(data).to_record(),
+                            "mode": ExportMode(mode).value, "path": str(destination),
+                            "validation": deepcopy(self.last_validated)}
         self.original_bytes = data
         self.dirty = False

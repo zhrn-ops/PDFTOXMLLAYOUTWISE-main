@@ -5,13 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-try:
-    from lxml import etree  # type: ignore
-    LXML_AVAILABLE = True
-except ModuleNotFoundError:
-    import xml.etree.ElementTree as etree
-
-    LXML_AVAILABLE = False
+from pdf_to_jats.core.xml_validation import SchemaProfile, ValidationResult, validate_xml
 
 from pdf_to_jats.models.document import Document
 
@@ -24,36 +18,24 @@ class ValidationError:
 
 
 class Validator:
-    """Validate generated JATS XML and required content."""
+    """Validate XML with an explicit format/profile, plus document content."""
 
     def __init__(self, schema_path: Path | None = None) -> None:
         self.schema_path = schema_path or Path(__file__).resolve().parents[1] / "schemas" / "jats_1_4.xsd"
 
+    def validate_result(self, xml_path: Path, profile: SchemaProfile | None = None) -> ValidationResult:
+        """Return independent syntax/schema/semantic results for exact file bytes."""
+        if profile is None and self.schema_path.exists():
+            profile = SchemaProfile("JATS legacy schema", "JATS", self.schema_path)
+        return validate_xml(xml_path.read_bytes(), profile)
+
     def validate(self, xml_path: Path) -> list[ValidationError]:
-        errors: list[ValidationError] = []
+        """Compatibility issue list; absence of a schema is now explicitly reported."""
         try:
-            tree = etree.parse(str(xml_path))
-        except Exception as exc:
-            return [ValidationError(message=f"XML parse error: {exc}")]
-        root = tree.getroot()
-        if LXML_AVAILABLE and self.schema_path.exists():
-            try:
-                schema_doc = etree.parse(str(self.schema_path))
-                schema = etree.XMLSchema(schema_doc)
-                if not schema.validate(tree):
-                    for entry in schema.error_log:
-                        errors.append(ValidationError(f"Schema error: {entry.message}"))
-            except Exception as exc:
-                errors.append(ValidationError(f"Schema load error: {exc}"))
-        elif self.schema_path.exists() and not LXML_AVAILABLE:
-            errors.append(ValidationError("Schema validation skipped: lxml is not installed"))
-        if root.find(".//{http://www.elsevier.com/xml/ani/ani}titletext") is None and root.find(".//article-title") is None:
-            errors.append(ValidationError("Missing article title"))
-        if not root.findall(".//contrib") and not root.findall(".//{http://www.elsevier.com/xml/ani/ani}author"):
-            errors.append(ValidationError("Missing authors"))
-        if root.find(".//{http://www.elsevier.com/xml/ani/ani}abstract") is None and root.find(".//abstract") is None:
-            errors.append(ValidationError("Missing abstract"))
-        return errors
+            result = self.validate_result(xml_path)
+        except OSError as exc:
+            return [ValidationError(f"Could not read XML: {exc}")]
+        return [ValidationError(issue.message) for issue in result.issues]
 
     def validate_document(self, document: Document) -> list[ValidationError]:
         """Validate the intermediate document before XML export."""

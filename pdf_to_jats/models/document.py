@@ -129,10 +129,19 @@ class DocumentZone:
 
 
 @dataclass(slots=True)
+class DocumentTitle:
+    """An additional article title, usually a translation."""
+
+    text: str
+    language: str = ""
+
+
+@dataclass(slots=True)
 class Document:
     """Intermediate document representation used across the pipeline."""
 
     title: str = ""
+    alternate_titles: list[DocumentTitle] = field(default_factory=list)
     authors: list[Author] = field(default_factory=list)
     corresponding_author: Author | None = None
     affiliations: list[Affiliation] = field(default_factory=list)

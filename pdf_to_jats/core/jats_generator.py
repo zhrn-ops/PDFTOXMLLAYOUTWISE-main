@@ -16,6 +16,8 @@ except ModuleNotFoundError:
 
     LXML_AVAILABLE = False
 
+from pdf_to_jats.core.atomic_io import atomic_write_bytes
+from pdf_to_jats.core.xml_validation import ExportMode, SchemaProfile, validate_xml
 from pdf_to_jats.models.document import Document
 from pdf_to_jats.core.inline_script_detector import normalize_inline_runs
 
@@ -28,11 +30,14 @@ class JATSGenerator:
     CE_NS = "http://www.elsevier.com/xml/ani/common"
     SCHEMA_LOCATION = "http://www.elsevier.com/xml/ani/ani http://www.elsevier.com/xml/ani/ani515-input-CAR.xsd"
 
-    def generate(self, document: Document, output_path: Path) -> Path:
-        """Write an ANI XML file for the document."""
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(self.to_bytes(document))
+    def generate(self, document: Document, output_path: Path, *,
+                 mode: ExportMode = ExportMode.DRAFT,
+                 profile: SchemaProfile | None = None) -> Path:
+        """Atomically publish a draft, or require the selected schema for strict export."""
+        data = self.to_bytes(document)
+        result = validate_xml(data, profile)
+        result.require_export(mode)
+        atomic_write_bytes(output_path, data)
         return output_path
 
     def to_bytes(self, document: Document) -> bytes:
@@ -60,10 +65,8 @@ class JATSGenerator:
             "xsi": self.XSI_NS,
             "ce": self.CE_NS,
         }
-        root = etree.Element(
-            self._qname("units"),
-            nsmap=nsmap if LXML_AVAILABLE else None,
-        )
+        root = (etree.Element(self._qname("units"), nsmap=nsmap) if LXML_AVAILABLE
+                else etree.Element(self._qname("units")))
         root.set(self._qname_attr("schemaLocation", self.XSI_NS), self.SCHEMA_LOCATION)
 
         unit = etree.SubElement(root, self._qname("unit"))
@@ -142,11 +145,32 @@ class JATSGenerator:
                 self._optional_text(identifiers, name, related.get(name), self.CE_NS)
 
         citation_title = etree.SubElement(head, self._qname("citation-title"))
+        title_language = (
+            str(document.metadata.get("title_language") or "").strip().upper()
+            or self._metadata_value(document, "language", "ENG").strip().upper()
+            or "ENG"
+        )
         titletext = etree.SubElement(citation_title, self._qname("titletext"))
-        titletext.set(self._qname_attr("lang", "http://www.w3.org/XML/1998/namespace"), self._metadata_value(document, "language", "ENG"))
+        titletext.set(self._qname_attr("lang", "http://www.w3.org/XML/1998/namespace"), title_language)
         titletext.set("original", "y")
         title_text = self._sanitize_title(document.title, document.abstract_number())
         self._append_scripted_text(titletext, title_text, self._script_runs(document, "title"))
+
+        seen_titles = {" ".join(title_text.split()).casefold()}
+        for alternate in document.alternate_titles:
+            alternate_text = self._sanitize_title(alternate.text, document.abstract_number())
+            alternate_key = " ".join(alternate_text.split()).casefold()
+            if not alternate_key or alternate_key in seen_titles:
+                continue
+            seen_titles.add(alternate_key)
+            alternate_node = etree.SubElement(citation_title, self._qname("titletext"))
+            alternate_language = str(alternate.language or "UND").strip().upper() or "UND"
+            alternate_node.set(
+                self._qname_attr("lang", "http://www.w3.org/XML/1998/namespace"),
+                alternate_language,
+            )
+            alternate_node.set("original", "n")
+            self._append_scripted_text(alternate_node, alternate_text, [])
 
         # Multiple affiliations repeat the same author object in the XML.
         # Sequence identifies their original byline position, not occurrences.
@@ -514,10 +538,14 @@ class JATSGenerator:
             if kind not in {"sup", "sub"}:
                 continue
             if expected and not re.fullmatch(r"[\d+\-−]+", str(expected)):
-                # Current extraction rules annotate numeric indices, charges,
-                # and powers. A stale one-letter offset must never turn an
-                # ordinary word character into a script element.
-                continue
+                # Preserve explicit or measured alphabetic/Greek annotations
+                # only at their exact matching offsets. Never relocate a letter
+                # to a nearby ordinary word after text edits.
+                source = str(run.get("source") or "manual")
+                if (source not in {"manual", "geometry", "font_flag", "lexicon"}
+                        or not 0 <= start < end <= len(text)
+                        or text[start:end] != expected):
+                    continue
             # Only relocate an offset when its expected run has one unambiguous
             # nearby match. Never wrap an unrelated character just because a
             # stale offset is still within the text bounds.
