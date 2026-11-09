@@ -75,6 +75,48 @@ def _affiliation(identifier: str, organization: str) -> Affiliation:
     )
 
 
+def test_sample_shared_affiliation_keeps_five_authors_in_one_ordered_group():
+    names = [
+        ("K.E.", "Kirsten E.", "Peters"),
+        ("S.", "Scott", "Bringans"),
+        ("W.A.", "Wendy A.", "Davis"),
+        ("R.J.", "Richard J.", "Lipscombe"),
+        ("T.", "Timothy", "Davis"),
+    ]
+    document = _document(
+        [Author(initials=initials, given_names=given, surname=surname,
+                display_name=f"{given} {surname}", affiliation_ids=["1"])
+         for initials, given, surname in names],
+        [Affiliation(id="1", text="Perth, Australia, Fremantle, Australia")],
+    )
+    root = etree.fromstring(JATSGenerator().to_bytes(document))
+    groups = root.findall(f".//{_q('author-group')}")
+    assert len(groups) == 1
+    assert groups[0].get("seq") == "1"
+    authors = groups[0].findall(_q("author"))
+    assert [author.get("seq") for author in authors] == ["1", "2", "3", "4", "5"]
+    assert [(author.findtext(_ce("initials")), author.findtext(_ce("given-name")),
+             author.findtext(_ce("surname"))) for author in authors] == names
+    assert [child.tag for child in groups[0]] == [_q("author")] * 5 + [_q("affiliation")]
+
+
+def test_author_sequence_continues_across_affiliation_groups():
+    names = ["Issa", "Guinot", "Michaudel", "Rivière", "Houdeau", "Adel-Patient"]
+    document = _document(
+        [_author(initial, name, [marker]) for initial, name, marker in zip(
+            ["M.", "M.", "C.", "G.", "E.", "K."], names,
+            ["1", "1", "1", "2", "3", "1"],
+        )],
+        [_affiliation(str(index), f"University {index}") for index in range(1, 4)],
+    )
+    root = etree.fromstring(JATSGenerator().to_bytes(document))
+    groups = root.findall(f".//{_q('author-group')}")
+    assert [group.get("seq") for group in groups] == ["1", "2", "3", "4"]
+    assert [[author.get("seq") for author in group.findall(_q("author"))]
+            for group in groups] == [["1", "2", "3"], ["4"], ["5"], ["6"]]
+    assert [name for group in groups for name in _surnames(group)] == names
+
+
 def test_each_affiliation_gets_its_own_author_group(tmp_path):
     groups = _groups(
         tmp_path,
@@ -100,9 +142,30 @@ def test_author_with_two_affiliations_is_repeated_in_both_groups(tmp_path):
         ),
     )
 
-    assert len(groups) == 2
-    assert _surnames(groups[0]) == ["Alpha", "Beta"]
-    assert _surnames(groups[1]) == ["Alpha"]
+    assert [_surnames(group) for group in groups] == [["Alpha"], ["Alpha"], ["Beta"]]
+    assert [_organization(group) for group in groups] == [
+        "First University", "Second University", "First University",
+    ]
+
+
+def test_multiple_affiliations_preserve_besafebeehoney_byline_numbers():
+    names = ["Leite", "Varenina", "Leston", "Ćirić", "Nebot", "Pugajeva",
+             "Gajger", "Ruedenauer", "Hoxha", "Freitas"]
+    markers = [["1", "2"], ["3"], ["4"], ["5"], ["6"], ["7"],
+               ["8"], ["9"], ["10"], ["1", "2"]]
+    document = _document(
+        [_author("A.", name, affiliations) for name, affiliations in zip(names, markers)],
+        [_affiliation(str(index), f"University {index}") for index in range(1, 11)],
+    )
+    root = etree.fromstring(JATSGenerator().to_bytes(document))
+    groups = root.findall(f".//{_q('author-group')}")
+    authors = [author for group in groups for author in group.findall(_q("author"))]
+    assert [(author.findtext(_ce("surname")), author.get("seq")) for author in authors] == [
+        ("Leite", "1"), ("Leite", "1"), ("Varenina", "2"), ("Leston", "3"),
+        ("Ćirić", "4"), ("Nebot", "5"), ("Pugajeva", "6"), ("Gajger", "7"),
+        ("Ruedenauer", "8"), ("Hoxha", "9"), ("Freitas", "10"), ("Freitas", "10"),
+    ]
+    assert [group.get("seq") for group in groups] == [str(i) for i in range(1, 13)]
 
 
 def test_authors_without_affiliations_are_not_dropped(tmp_path):
@@ -112,10 +175,37 @@ def test_authors_without_affiliations_are_not_dropped(tmp_path):
     )
 
     assert len(groups) == 2
-    assert _organization(groups[0]) == "First University"
-    assert _surnames(groups[0]) == []
+    assert _organization(groups[0]) is None
+    assert _surnames(groups[0]) == ["Alpha"]
+    assert _organization(groups[1]) == "First University"
+    assert _surnames(groups[1]) == []
+
+
+def test_wrapped_byline_keeps_printed_order_when_affiliation_repeats(tmp_path):
+    linked = AuthorLinker().link_from_texts(
+        ["A. Kawai1; S. Ishibashi1; Y. Miura1; T. Itonaga1; N. Yanagida1;",
+         "S. Sato1; E. Makita2; H. Taniguchi3; T. Kitatsu4; Y. Koike5;",
+         "M. Ebisawa1"],
+        [f"{number} University {number}" for number in range(1, 6)],
+    )
+    groups = _groups(tmp_path, _document(linked.authors, linked.affiliations))
+    assert [name for group in groups for name in _surnames(group)] == [
+        "Kawai", "Ishibashi", "Miura", "Itonaga", "Yanagida", "Sato",
+        "Makita", "Taniguchi", "Kitatsu", "Koike", "Ebisawa",
+    ]
+    assert [len(_surnames(group)) for group in groups] == [6, 1, 1, 1, 1, 1]
+    assert _organization(groups[0]) == _organization(groups[-1])
+
+
+@pytest.mark.parametrize("missing_ids", [[], ["unknown"]])
+def test_unresolved_author_stays_between_linked_authors(tmp_path, missing_ids):
+    groups = _groups(tmp_path, _document(
+        [_author("A.", "Alpha", ["1"]), _author("B.", "Beta", missing_ids),
+         _author("C.", "Gamma", ["1"])],
+        [_affiliation("1", "First University")],
+    ))
+    assert [_surnames(group) for group in groups] == [["Alpha"], ["Beta"], ["Gamma"]]
     assert _organization(groups[1]) is None
-    assert _surnames(groups[1]) == ["Alpha"]
 
 
 def test_linker_order_drives_the_group_order(tmp_path):

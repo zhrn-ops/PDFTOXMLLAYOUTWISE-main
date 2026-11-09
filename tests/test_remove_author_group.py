@@ -133,6 +133,24 @@ def test_transfer_author_updates_groups_and_supports_undo(qapp, monkeypatch, cop
         window.deleteLater()
 
 
+@pytest.mark.parametrize('copy', [True, False])
+@pytest.mark.parametrize('sequence', ['6', '1', None])
+def test_transfer_preserves_original_author_sequence(copy, sequence):
+    session = XmlDocumentSession.from_text(SOURCE, Path('draft.xml'))
+    author = session.authors()[0]
+    if sequence is not None:
+        author.set('seq', sequence)
+    target = session.affiliation_groups()[1][3]
+    target[0].set('seq', '4')
+    transferred = session.transfer_author(0, target, copy=copy)
+    assert transferred.get('seq') == sequence
+    assert target[0].get('seq') == '4'
+    if copy:
+        assert author.get('seq') == sequence
+    reloaded = XmlDocumentSession.from_text(session.xml_text(), Path('draft.xml'))
+    assert reloaded.affiliation_groups()[1][3][1].get('seq') == sequence
+
+
 def test_copy_preserves_markup_and_remaps_internal_references():
     session = XmlDocumentSession.from_text(SOURCE.replace(
         '<surname>Smith</surname>', '<surname><bold id="n1">Smith</bold></surname><xref rid="n1 external"/>'), Path('draft.xml'))

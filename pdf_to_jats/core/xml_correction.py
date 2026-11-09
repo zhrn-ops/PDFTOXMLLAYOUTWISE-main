@@ -233,6 +233,92 @@ class XmlDocumentSession:
             groups.append(("No affiliation linked", unassigned, [], None))
         return groups
 
+    def duplicate_affiliations(self):
+        """Map affiliation paths to matching locations in the correction list.
+
+        Compare current ANI fields, not potentially stale source text. IDs and
+        formatting do not identify institutions; country codes do. Repetition
+        is informational and never changes author links or the XML.
+        """
+        matches = {}
+        normalize = lambda value: " ".join(value.split()).casefold()
+        for number, (_, _, nodes, _) in enumerate(self.affiliation_groups(), 1):
+            for index, node in enumerate(nodes, 1):
+                fields = []
+                if self._local_name(node) == 'affiliation':
+                    for child in node:
+                        name = self._local_name(child)
+                        if not name or name in {'source-text', 'label'}:
+                            continue
+                        value = normalize(''.join(child.itertext()))
+                        attributes = tuple(sorted(
+                            (key, normalize(value)) for key, value in child.attrib.items()
+                            if etree.QName(key).localname not in {'id', 'affiliation-instance-id'}
+                        ))
+                        if value or attributes:
+                            fields.append((name, value, attributes))
+                key = ('fields', tuple(sorted(fields))) if fields else (
+                    'text', normalize(self._affiliation_label(node)))
+                if not key[1]:
+                    continue
+                location = f'Group {number}'
+                if len(nodes) > 1:
+                    location += f', affiliation {index}'
+                matches.setdefault(key, []).append((self.tree.getpath(node), location))
+        return {
+            path: [location for other, location in entries if other != path]
+            for entries in matches.values() if len(entries) > 1
+            for path, _ in entries
+        }
+
+    def duplicate_affiliation_sets(self):
+        """Return matching entries together, in correction-list order."""
+        duplicates = self.duplicate_affiliations()
+        sets = {}
+        for number, (_, _, nodes, _) in enumerate(self.affiliation_groups(), 1):
+            for index, node in enumerate(nodes, 1):
+                path = self.tree.getpath(node)
+                if path not in duplicates:
+                    continue
+                location = f'Group {number}'
+                if len(nodes) > 1:
+                    location += f', affiliation {index}'
+                key = frozenset([location, *duplicates[path]])
+                sets.setdefault(key, []).append((location, node))
+        return list(sets.values())
+
+    def merge_duplicate_affiliations(self, nodes):
+        """Keep the first affiliation and move all authors into its ANI group."""
+        if len(nodes) < 2 or not any(
+                [node for _, node in entries] == list(nodes)
+                for entries in self.duplicate_affiliation_sets()):
+            raise ValueError('Duplicate affiliations changed; review the matches again')
+        groups = [node.getparent() for node in nodes]
+        if len(set(groups)) != len(groups) or any(
+                self._local_name(group) != 'author-group'
+                or [c for c in group if self._local_name(c) == 'affiliation'] != [node]
+                or any(self._local_name(c) not in {'author', 'affiliation'} for c in group)
+                for group, node in zip(groups, nodes)):
+            raise ValueError('Automatic consolidation requires one affiliation per ANI author group. Edit these entries individually.')
+        # Preflight every removal before moving anything. Author IDs survive.
+        removed = set()
+        for group, node in zip(groups[1:], nodes[1:]):
+            removed.add(group)
+            removed.update(node.iter())
+        ids = {value for node in removed for key, value in node.attrib.items()
+               if etree.QName(key).localname in {'id', 'affiliation-instance-id'}}
+        if any(ids.intersection(node.get('rid', '').split())
+               for node in self.tree.iter() if node not in removed):
+            raise ValueError('These affiliations have XML references. Resolve them in Raw XML before consolidation.')
+        destination = groups[0]
+        for group in groups[1:]:
+            for author in list(group):
+                if self._local_name(author) == 'author':
+                    destination.insert(destination.index(nodes[0]), author)
+            group.getparent().remove(group)
+        self.dirty = True
+        self.validation = []
+
     def author_affiliation_groups(self):
         """Return affiliation labels and author indices using XML relationships."""
         return [(label, indices) for label, indices, _nodes, _container in self.affiliation_groups()]
@@ -844,7 +930,7 @@ class XmlDocumentSession:
         self.validation = []
 
     def transfer_author(self, index: int, destination, *, copy: bool = False):
-        """Copy or move a complete author into another ANI group."""
+        """Copy or move an author, preserving their original sequence number."""
         authors = self.authors()
         if index < 0 or index >= len(authors):
             raise ValueError('Select an author to copy or move')
@@ -877,8 +963,8 @@ class XmlDocumentSession:
                 if node.get('rid'):
                     node.set('rid', ' '.join(replacements.get(ref, ref) for ref in node.get('rid').split()))
         target_authors = [child for child in destination if self._local_name(child) == 'author']
-        sequences = [int(child.get('seq')) for child in target_authors if (child.get('seq') or '').isdigit()]
-        transferred.set('seq', str(max(sequences, default=0) + 1))
+        # seq records the author's byline position, not their position in the
+        # destination affiliation group. Copies keep the same byline number.
         destination.insert(destination.index(target_authors[-1]) + 1 if target_authors else 0, transferred)
         self.dirty = True
         self.validation = []

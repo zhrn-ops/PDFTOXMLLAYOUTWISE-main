@@ -391,6 +391,13 @@ class AuthorLinker:
         entry_names: list[list[str]] = []
         entry_institutions: list[list[str]] = []
         authors_text = [self._normalize_marker_text(text) for text in authors_text]
+        # Some PDFs lose commas between raised markers ("Garcia2 3,4").
+        # Repair only numeric runs attached to a name, and only horizontal
+        # whitespace: a line boundary must remain available for name joining.
+        authors_text = [re.sub(
+            r"(?<=[^\W\d_])(\d{1,3}(?:[ \t]+\d{1,3})+)(?!\d)",
+            lambda match: re.sub(r"[ \t]+", ",", match.group(1)), text,
+        ) for text in authors_text]
         affiliations_text = [self._normalize_marker_text(text) for text in affiliations_text]
         known_markers = self._affiliation_letter_markers(affiliations_text)
         # PDF extraction can put consecutive byline rows in separate blocks.
@@ -565,7 +572,8 @@ class AuthorLinker:
         joined_lines: list[str] = []
         for line in lines:
             if joined_lines and AuthorLinker._is_wrapped_name_continuation(joined_lines[-1], line):
-                joined_lines[-1] = f"{joined_lines[-1].rstrip()} {line.lstrip()}"
+                separator = "" if joined_lines[-1].endswith(("-", "\u2010", "\u2011")) else " "
+                joined_lines[-1] = f"{joined_lines[-1].rstrip()}{separator}{line.lstrip()}"
             else:
                 joined_lines.append(line)
         return [
@@ -578,12 +586,31 @@ class AuthorLinker:
     def _is_wrapped_name_continuation(previous_line: str, next_line: str) -> bool:
         """Recognize a name split at a line edge before a marked surname."""
 
+        tail = re.split(r"[,;]", previous_line)[-1].strip()
+        if _INSTITUTION_WORDS.search(tail) or _INSTITUTION_TOKEN.fullmatch(tail):
+            return False
         previous_tail = re.search(r"[,;]\s*([A-Z][A-Za-z'\u2019\-]+)$", previous_line)
         next_head = re.match(
             r"([A-Z][A-Za-z'\u2019\-]+)(?:\d{1,3}|[*\u2020\u2021]+)?(?:,|\s|$)",
             next_line,
         )
-        return bool(previous_tail and next_head)
+        if previous_tail and next_head:
+            return True
+
+        # In a marked byline, an unmarked trailing name can contain several
+        # given names or the first half of a hyphenated surname. The next row
+        # must finish that name with a marker, not start an institution.
+        letter = r"[^\W\d_]"
+        # Use Unicode letters so accented names at either edge are retained.
+        word = rf"{letter}(?:{letter}|['\u2019.\-\u2010\u2011])*"
+        name = rf"{word}(?:\s+{word})*"
+        has_marked_context = bool(re.search(r"\d\s*[,;]", previous_line))
+        hyphenated = tail.endswith(("-", "\u2010", "\u2011"))
+        return bool(
+            (has_marked_context or hyphenated)
+            and re.fullmatch(name, tail)
+            and re.match(rf"{name}\s*\d{{1,3}}(?:\s*[,;]|$)", next_line)
+        )
 
     def _split_entry(self, entry: str) -> tuple[list[str], list[str]]:
         """Split one entry into its names and its affiliations."""

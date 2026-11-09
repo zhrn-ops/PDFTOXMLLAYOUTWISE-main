@@ -148,12 +148,15 @@ class JATSGenerator:
         title_text = self._sanitize_title(document.title, document.abstract_number())
         self._append_scripted_text(titletext, title_text, self._script_runs(document, "title"))
 
+        # Multiple affiliations repeat the same author object in the XML.
+        # Sequence identifies their original byline position, not occurrences.
+        author_sequences = {id(author): position for position, author in enumerate(document.authors, start=1)}
         for seq, (affiliation, group_authors) in enumerate(self._author_groups(document), start=1):
             author_group = etree.SubElement(head, self._qname("author-group"))
             author_group.set("seq", str(seq))
-            for author_seq, author in enumerate(group_authors, start=1):
+            for author in group_authors:
                 author_el = etree.SubElement(author_group, self._qname("author"))
-                author_el.set("seq", str(author_seq))
+                author_el.set("seq", str(author_sequences[id(author)]))
                 initials = self._sanitize_xml_text(author.initials)
                 surname = self._sanitize_xml_text(author.surname)
                 given_names = self._sanitize_xml_text(author.given_names)
@@ -302,26 +305,33 @@ class JATSGenerator:
         self._optional_text(container, "grant-text", document.metadata.get("grant_text"))
 
     def _author_groups(self, document: Document) -> list[tuple[Any, list[Any]]]:
-        """Group authors under the affiliation each of them references.
+        """Group consecutive authors without changing the printed sequence.
 
         ANI expresses the author/affiliation link structurally, so every
         ``<author-group>`` carries one affiliation plus the authors pointing at
-        it. An author with several affiliations is repeated in each of their
-        groups, and authors with none are emitted last without an affiliation so
-        they are not silently dropped.
+        it. Repeat an affiliation when it occurs again later in the byline.
+        Authors with several affiliations have adjacent occurrences, while
+        authors with no resolved affiliation stay in their original position.
         """
 
         groups: list[tuple[Any, list[Any]]] = []
-        for affiliation in document.affiliations:
-            # Unreferenced affiliations are still emitted; the linker reports
-            # them rather than letting them vanish from the output.
-            members = [
-                author for author in document.authors if affiliation.id in author.affiliation_ids
+        referenced: set[str] = set()
+        for author in document.authors:
+            affiliations = [
+                affiliation for affiliation in document.affiliations
+                if affiliation.id in author.affiliation_ids
             ]
-            groups.append((affiliation, members))
-        unassigned = [author for author in document.authors if not author.affiliation_ids]
-        if unassigned:
-            groups.append((None, unassigned))
+            for affiliation in affiliations or [None]:
+                if affiliation is not None:
+                    referenced.add(affiliation.id)
+                if groups and groups[-1][0] is affiliation:
+                    groups[-1][1].append(author)
+                else:
+                    groups.append((affiliation, [author]))
+        # Preserve unreferenced institutions without moving any author.
+        for affiliation in document.affiliations:
+            if affiliation.id not in referenced:
+                groups.append((affiliation, []))
         return groups
 
     def _append_affiliation(self, parent, affiliation):

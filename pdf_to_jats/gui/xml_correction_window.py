@@ -194,6 +194,16 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self.tabs.addTab(keywords_page, "Keywords")
         authors_page = QWidget(); author_layout = QVBoxLayout(authors_page); author_layout.addWidget(QLabel("Double-click an author or affiliation to edit its fields.")); author_layout.addWidget(self.author_list)
         self.author_list.setWordWrap(True)
+        self.parser_review = QLabel()
+        self.parser_review.setWordWrap(True)
+        self.parser_review.setTextFormat(Qt.PlainText)
+        self.parser_review.setStyleSheet('color: #dc4444;')
+        self.parser_review.hide()
+        author_layout.insertWidget(1, self.parser_review)
+        self.review_duplicates = QPushButton('Review duplicate affiliations')
+        self.review_duplicates.setObjectName('review_duplicate_affiliations')
+        self.review_duplicates.clicked.connect(self.show_duplicate_affiliations)
+        author_layout.insertWidget(1, self.review_duplicates)
         author_layout.addLayout(author_buttons)
         self.tabs.addTab(authors_page, "Authors && Affiliations")
         abstract_page = QWidget(); abstract_layout = QVBoxLayout(abstract_page)
@@ -215,6 +225,11 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self.abstract_find_previous.clicked.connect(lambda: self._find_abstract(backward=True))
         self.abstract_find_next.clicked.connect(lambda: self._find_abstract())
         abstract_layout.addLayout(find_row)
+        grammar_button = QPushButton('Check grammar && typos')
+        grammar_button.setObjectName('check_abstract_grammar')
+        grammar_button.setToolTip('Review common English typos and grammar issues locally')
+        grammar_button.clicked.connect(self.check_abstract_grammar)
+        abstract_layout.addWidget(grammar_button)
         abstract_layout.addWidget(self._formatting_toolbar(self.abstract_edit, "abstract"))
         abstract_layout.addWidget(self.abstract_edit)
         abstract_layout.addWidget(_script_legend())
@@ -558,6 +573,94 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         editor.verticalScrollBar().setValue(scroll_position)
         editor.setFocus()
 
+    def set_parser_issues(self, linked) -> None:
+        """Retain parsing diagnostics alongside their author/affiliation targets."""
+        from pdf_to_jats.core.jats_generator import JATSGenerator
+        from pdf_to_jats.models.document import Document
+
+        if not self.session or self._draft_key is None:
+            return
+        sequences = {author.id: str(index) for index, author in enumerate(linked.authors, 1)
+                     if author.id}
+        groups = JATSGenerator()._author_groups(Document(
+            authors=linked.authors, affiliations=linked.affiliations))
+        records = []
+        for issue in linked.issues:
+            records.append({
+                'message': issue.message, 'severity': issue.severity,
+                'author_seq': sequences.get(issue.author_id),
+                'group_seqs': [str(index) for index, (affiliation, _) in enumerate(groups, 1)
+                               if affiliation is not None and issue.affiliation_id
+                               and affiliation.id == issue.affiliation_id],
+                'correspondence': 'correspond' in issue.message.lower(),
+            })
+        record = self._drafts[self._draft_key]
+        record['parser_issues'] = records
+        record['parser_warnings'] = [issue.message for issue in linked.issues]
+        self._refresh()
+        self._retain_draft()
+
+    def _show_parser_issues(self) -> None:
+        """Show diagnostics at their fields; never insert them into the XML."""
+        record = self._drafts.get(self._draft_key, {})
+        issues = record.get('parser_issues', [])
+        unmatched = []
+        authors = self.session.authors()
+        matched = set()
+        group_issues = {}
+        for _, indices, _, container in self.session.affiliation_groups():
+            if container is None:
+                continue
+            sequences = {authors[index].get('seq') for index in indices}
+            found = [i for i, issue in enumerate(issues)
+                     if (issue.get('author_seq') and issue['author_seq'] in sequences)
+                     or container.get('seq') in issue.get('group_seqs', [])]
+            group_issues[self.session.tree.getpath(container)] = found
+            matched.update(found)
+        for index, issue in enumerate(issues):
+            if index not in matched:
+                unmatched.append(issue['message'])
+        if not issues:
+            unmatched.extend(record.get('parser_warnings', []))
+        notice = 'Parser review notes — check against the PDF; notes remain until parsing is rerun.'
+        self.parser_review.setText('\n'.join([notice, *unmatched]) if issues or unmatched else '')
+        self.parser_review.setVisible(bool(issues or unmatched))
+        for row in range(self.author_list.count()):
+            item = self.author_list.item(row)
+            group_path = item.data(Qt.UserRole + 2)
+            index = item.data(Qt.UserRole)
+            if group_path:
+                found = group_issues.get(group_path, [])
+            elif index is not None:
+                sequence = authors[index].get('seq')
+                found = [i for i, issue in enumerate(issues)
+                         if sequence and issue.get('author_seq') == sequence]
+            else:
+                continue
+            if not found:
+                continue
+            message = '\n'.join(dict.fromkeys(issues[i]['message'] for i in found))
+            if not item.data(Qt.UserRole + 3):
+                item.setBackground(QColor('#54252b'))
+                item.setForeground(QColor('#ffb4b4'))
+            item.setToolTip(item.toolTip() + '\nParser review: ' + message)
+            widget = self.author_list.itemWidget(item)
+            if widget is None:
+                item.setText(item.text() + ('\nParser review note (hover for details)' if item.data(Qt.UserRole + 3)
+                                            else '\nReview: ' + message))
+            else:
+                label = widget.layout().itemAt(0).widget()
+                label.setText(label.text() + '\nReview: ' + message)
+                label.setWordWrap(True)
+                label.setStyleSheet('color: #ffb4b4;')
+                label.setToolTip(message)
+                item.setSizeHint(widget.sizeHint())
+        for issue in issues:
+            if issue.get('correspondence'):
+                item = QListWidgetItem('Parser review: ' + issue['message'])
+                item.setForeground(QColor('#dc4444'))
+                self.correspondence_details.insertItem(0, item)
+
     def _refresh_fields(self, *, preserve_abstract: bool = False) -> None:
         """Refresh structured controls without replacing either XML editor."""
         if not self.session: return
@@ -569,6 +672,27 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self._highlight_scripts(self.abstract_edit, s.abstract_node())
         self.author_list.clear()
         authors = s.authors()
+        duplicates = s.duplicate_affiliations()
+        duplicate_sets = s.duplicate_affiliation_sets()
+        badges = {s.tree.getpath(node): number for number, entries in enumerate(duplicate_sets, 1)
+                  for _, node in entries}
+        self.review_duplicates.setText(f'Review duplicate affiliations ({len(duplicate_sets)} sets)')
+        self.review_duplicates.setEnabled(bool(duplicate_sets))
+
+        def highlight_duplicates(item, nodes):
+            locations = list(dict.fromkeys(location for node in nodes
+                                for location in duplicates.get(s.tree.getpath(node), [])))
+            if not locations:
+                return
+            message = 'Repeated affiliation — also in ' + '; '.join(locations)
+            numbers = sorted({badges[s.tree.getpath(node)] for node in nodes if s.tree.getpath(node) in badges})
+            badge = ' / '.join(f'Duplicate set {number}' for number in numbers)
+            item.setData(Qt.UserRole + 3, badge)
+            item.setText(badge + ' | ' + item.text() + '\n' + message)
+            item.setBackground(QColor('#fff0bf'))
+            item.setForeground(QColor('#614400'))
+            item.setToolTip(message + '\nShared affiliations may be intentional. Review before changing.\n'
+                            + item.toolTip())
 
         def affiliation_editable(node) -> bool:
             return etree.QName(node).localname == 'affiliation'
@@ -580,6 +704,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 item.setToolTip("Double-click to edit affiliation fields")
             else:
                 item.setToolTip("This affiliation has no editable fields here; use Raw XML")
+            highlight_duplicates(item, [target])
             self.author_list.addItem(item)
 
         for number, (label, indices, nodes, container) in enumerate(s.affiliation_groups(), 1):
@@ -600,6 +725,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 heading.setData(Qt.UserRole + 1, s.tree.getpath(container))
                 heading.setToolTip("Double-click to add affiliation fields")
             font = heading.font(); font.setBold(True); heading.setFont(font)
+            highlight_duplicates(heading, nodes)
             self.author_list.addItem(heading)
             if len(nodes) > 1:
                 for index, target in enumerate(nodes, 1):
@@ -658,6 +784,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self.keyword_list.clear()
         for node in s.keywords(): self.keyword_list.addItem(" ".join("".join(node.itertext()).split()))
         self._fill_correspondence()
+        self._show_parser_issues()
 
     def _fill_correspondence(self) -> None:
         """Show the corresponding author and their editable affiliations."""
@@ -811,6 +938,14 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             self._highlight_scripts(self.title_edit, self.session.title_node())
             self.title_edit.blockSignals(False)
 
+    def check_abstract_grammar(self):
+        if not self.session:
+            return
+        from pdf_to_jats.gui.grammar_review import GrammarReviewDialog
+        dialog = GrammarReviewDialog(self.abstract_edit, self._record_history, self)
+        dialog.exec()
+        dialog.deleteLater()
+
     def _abstract_changed(self) -> None:
         if not self._syncing and self.session:
             try: self.session.set_abstract(self.abstract_edit.toPlainText())
@@ -892,6 +1027,97 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         else:
             self._unparsed_text = text
             self.status.setText(f"XML parse error at line {line}, column {column}: {message}")
+
+    def show_duplicate_affiliations(self):
+        if not self.session:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Review duplicate affiliations')
+        dialog.resize(780, 560)
+        layout = QVBoxLayout(dialog)
+        help_text = QLabel('Select a duplicate set to compare its groups and authors.\n'
+                           'Remove duplicates keeps the first affiliation and moves all authors into its group.\n'
+                           'Author sequence numbers are preserved; group order changes. You can Undo this action.')
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+        choices = QListWidget()
+        choices.setObjectName('duplicate_sets')
+        choices.setWordWrap(True)
+        layout.addWidget(choices)
+        details = QPlainTextEdit()
+        details.setObjectName('duplicate_details')
+        details.setReadOnly(True)
+        layout.addWidget(details, 1)
+        actions = QHBoxLayout()
+        remove = QPushButton('Remove duplicates — keep first group')
+        remove.setObjectName('merge_duplicate_affiliations')
+        jump = QPushButton('Go to first affiliation')
+        close = QPushButton('Close')
+        for button in (jump, remove, close):
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        sets = []
+
+        def populate():
+            sets[:] = self.session.duplicate_affiliation_sets()
+            choices.clear()
+            for number, entries in enumerate(sets, 1):
+                choices.addItem(f'Duplicate set {number}: ' + ', '.join(label for label, _ in entries))
+            remove.setEnabled(bool(sets))
+            jump.setEnabled(bool(sets))
+            if sets:
+                choices.setCurrentRow(0)
+            else:
+                details.setPlainText('No duplicate affiliations remain.')
+
+        def show_details(row):
+            if not 0 <= row < len(sets):
+                return
+            chunks = []
+            for index, (label, node) in enumerate(sets[row]):
+                names = [self.session.author_name(author) or 'Unnamed author'
+                         for author in node.getparent() if self.session._local_name(author) == 'author']
+                fields = [' '.join(''.join(child.itertext()).split())
+                          for child in node if self.session._local_name(child) not in {'source-text', 'label'}]
+                chunks.append(f'{label} — ' + ('KEEP' if index == 0 else 'REMOVE duplicate; move authors')
+                              + '\n' + (', '.join(filter(None, fields)) or self.session._affiliation_label(node))
+                              + '\nAuthors: ' + (', '.join(names) or 'None')
+                              + '\nSource text: ' + self.session._affiliation_label(node))
+            details.setPlainText('\n\n'.join(chunks))
+
+        def merge():
+            row = choices.currentRow()
+            if not 0 <= row < len(sets):
+                return
+            self._record_history()
+            try:
+                self.session.merge_duplicate_affiliations([node for _, node in sets[row]])
+            except ValueError as exc:
+                QMessageBox.information(dialog, 'Review affiliations individually', str(exc))
+                return
+            self._refresh()
+            populate()
+
+        def go_to():
+            row = choices.currentRow()
+            if not 0 <= row < len(sets):
+                return
+            path = self.session.tree.getpath(sets[row][0][1])
+            for index in range(self.author_list.count()):
+                item = self.author_list.item(index)
+                if item.data(Qt.UserRole + 1) == path:
+                    self.author_list.setCurrentItem(item)
+                    self.author_list.scrollToItem(item)
+                    break
+            dialog.accept()
+
+        choices.currentRowChanged.connect(show_details)
+        remove.clicked.connect(merge)
+        jump.clicked.connect(go_to)
+        close.clicked.connect(dialog.accept)
+        populate()
+        dialog.exec()
+        dialog.deleteLater()
 
     def edit_affiliation_item(self, item) -> None:
         """Open the affiliation editor for a list row carrying a node path."""
@@ -1211,6 +1437,14 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         try:
             self._record_history()
             self.session.set_corresponding_author(index)
+            # Explicit selection resolves only the parser's fallback choice;
+            # unrelated name, affiliation and correspondence notes remain.
+            record = self._drafts.get(self._draft_key, {})
+            fallback = 'No corresponding author was matched explicitly;'
+            record['parser_issues'] = [issue for issue in record.get('parser_issues', [])
+                                       if not issue.get('message', '').startswith(fallback)]
+            record['parser_warnings'] = [message for message in record.get('parser_warnings', [])
+                                         if not message.startswith(fallback)]
             self._refresh()
             for tab in range(self.tabs.count()):
                 if self.tabs.tabText(tab) == 'Corresponding Author':

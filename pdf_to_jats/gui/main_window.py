@@ -2297,11 +2297,7 @@ class MainWindow(QMainWindow):
             self._article_draft_keys[key] = correction._draft_key
             self._article_draft_keys[f'{key}|parser:{parser}'] = correction._draft_key
             if parser == 'grobid' and isinstance(response, LinkedAuthors):
-                correction._drafts[correction._draft_key]['parser_warnings'] = [issue.message for issue in response.issues]
-                if response.issues:
-                    QMessageBox.warning(self, 'GROBID draft needs review',
-                                        'The XML draft was created with these review warnings:\n\n' +
-                                        '\n\n'.join(issue.message for issue in response.issues))
+                correction.set_parser_issues(response)
         locked_count = self._run_article_finish_step(
             "Locking finished article blocks", lambda: self._lock_segment_blocks(segment, key)
         )
