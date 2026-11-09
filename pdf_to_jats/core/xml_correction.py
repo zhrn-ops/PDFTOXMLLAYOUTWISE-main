@@ -992,6 +992,9 @@ class XmlDocumentSession:
                           'suffix', 'e-address')
     AUTHOR_ATTRIBUTES = ('seq', 'author-instance-id', 'orcid')
     AUTHOR_FIELD_ALIASES = {'given-name': ('given-name', 'given-names')}
+    PERSON_NAME_FIELDS = AUTHOR_NAME_FIELDS + ('email', 'phone', 'fax')
+    PERSON_FIELD_ALIASES = {**AUTHOR_FIELD_ALIASES,
+                            'e-address': ('e-address', 'email')}
 
     def author_form(self, index: int) -> dict[str, str]:
         """Every editable author field, including attributes and absent fields.
@@ -1085,6 +1088,81 @@ class XmlDocumentSession:
                  if isinstance(element.tag, str)
                  and etree.QName(element).localname in self.AUTHOR_NAME_FIELDS
                  and self.AUTHOR_NAME_FIELDS.index(etree.QName(element).localname) > rank),
+                len(container),
+            )
+            child.text = value
+            container.insert(position, child)
+            changed = True
+        if changed:
+            self.dirty = True
+            self.validation = []
+        return changed
+
+    def _person_field_node(self, container, key: str):
+        names = self.PERSON_FIELD_ALIASES.get(key, (key,))
+        return next(
+            (child for child in container
+             if isinstance(child.tag, str) and etree.QName(child).localname in names),
+            None,
+        )
+
+    def corresponding_author_form(self):
+        """Return the editable fields of the correspondence person."""
+        person, details, _affiliations = self.correspondence()
+        if person is None:
+            raise ValueError("No corresponding author found in this XML")
+        values = dict(details)
+        for name in self.PERSON_NAME_FIELDS:
+            if name == "e-address" and "email" in values and not values.get("e-address"):
+                continue
+            values.setdefault(name, "")
+        return values
+
+    def set_corresponding_author_form(self, values: dict[str, str]) -> bool:
+        """Edit the corresponding-author person without recreating correspondence."""
+        person, _details, _affiliations = self.correspondence()
+        if person is None:
+            raise ValueError("No corresponding author found in this XML")
+        old = self.corresponding_author_form()
+        for key in set(values) - set(old):
+            if key not in self.PERSON_NAME_FIELDS:
+                raise ValueError("Corresponding author fields changed; reopen the editor")
+        if values == old:
+            return False
+        if not any(value.strip() for value in values.values()):
+            raise ValueError("A corresponding author must have at least one non-empty name field")
+        container = next(
+            (child for child in person
+             if isinstance(child.tag, str) and etree.QName(child).localname == 'name'),
+            person,
+        )
+        for key, value in values.items():
+            if value == old.get(key, ''):
+                continue
+            existing = self._person_field_node(container, key)
+            if existing is not None and len(existing):
+                raise ValueError(
+                    f"{key} contains inline formatting; use Raw XML to preserve its markup")
+        children = [child for child in container if isinstance(child.tag, str)]
+        namespace = etree.QName(children[0]).namespace if children else (
+            ANI_CE_NS if self.profile == 'ANI' else etree.QName(person).namespace)
+        changed = False
+        for key, value in values.items():
+            existing = self._person_field_node(container, key)
+            if existing is not None:
+                if value != ''.join(existing.itertext()):
+                    existing.text = value
+                    changed = True
+                continue
+            if not value or key not in self.PERSON_NAME_FIELDS:
+                continue
+            child = etree.Element(f'{{{namespace}}}{key}' if namespace else key)
+            rank = self.PERSON_NAME_FIELDS.index(key)
+            position = next(
+                (i for i, element in enumerate(container)
+                 if isinstance(element.tag, str)
+                 and etree.QName(element).localname in self.PERSON_NAME_FIELDS
+                 and self.PERSON_NAME_FIELDS.index(etree.QName(element).localname) > rank),
                 len(container),
             )
             child.text = value

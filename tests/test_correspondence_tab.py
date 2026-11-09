@@ -58,6 +58,37 @@ def test_correspondence_lookup_returns_person_details_and_affiliations(tmp_path)
     assert session._affiliation_label(affiliations[0]) == 'Corr Uni Boston'
 
 
+def test_corresponding_author_form_edits_the_person_name(tmp_path):
+    session = _session(tmp_path)
+
+    form = session.corresponding_author_form()
+    assert form['surname'] == 'Smith'
+    assert form['email'] == 'a.smith@example.com'
+
+    form.update({'initials': 'J.', 'surname': 'Ahmadi', 'given-name': 'Sara'})
+    assert session.set_corresponding_author_form(form)
+
+    _person, details, _affiliations = session.correspondence()
+    assert dict(details)['surname'] == 'Ahmadi'
+    assert dict(details)['given-name'] == 'Sara'
+    assert dict(details)['initials'] == 'J.'
+    assert dict(details)['email'] == 'a.smith@example.com'
+
+
+def test_corresponding_author_form_requires_an_existing_person(tmp_path):
+    session = XmlDocumentSession.from_text(
+        '<units xmlns="http://www.elsevier.com/xml/ani/ani"><head/></units>',
+        tmp_path / 'draft.xml',
+    )
+
+    try:
+        session.corresponding_author_form()
+    except ValueError as exc:
+        assert 'No corresponding author' in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError('The form should require a correspondence person')
+
+
 def test_correspondence_falls_back_to_the_matching_author_group(tmp_path):
     source = ANI.replace(
         '<affiliation affiliation-instance-id="corr1"><organization>Corr Uni</organization>'
@@ -92,6 +123,26 @@ def test_corresponding_author_tab_sits_after_abstract_and_lists_details(qapp, tm
             'Email: a.smith@example.com',
         ]
         assert _rows(window.correspondence_affiliations) == ['Corr Uni Boston']
+    finally:
+        window.deleteLater()
+
+
+def test_corresponding_author_name_can_be_edited_from_the_button(qapp, monkeypatch, tmp_path):
+    window = _window(tmp_path)
+
+    def fill(dialog):
+        dialog.findChild(QLineEdit, 'correspondence_surname').setText('Ahmadi')
+        dialog.findChild(QLineEdit, 'correspondence_given-name').setText('Sara')
+        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok).click()
+        return QDialog.Accepted
+
+    monkeypatch.setattr(QDialog, 'exec', fill)
+    try:
+        window.findChild(QPushButton, 'correspondence_edit_person').click()
+        assert 'Surname: Ahmadi' in _rows(window.correspondence_details)
+        assert 'Given names: Sara' in _rows(window.correspondence_details)
+        assert '<ce:surname>Ahmadi</ce:surname>' in window.session.xml_text()
+        assert '<ce:given-name>Sara</ce:given-name>' in window.session.xml_text()
     finally:
         window.deleteLater()
 

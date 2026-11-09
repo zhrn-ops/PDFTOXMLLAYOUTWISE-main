@@ -23,12 +23,15 @@ digits inside institution text are never mistaken for one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import difflib
 import re
+import unicodedata
 from typing import Any
 
 from pdf_to_jats.core.auto_refiner import looks_like_address
+from pdf_to_jats.core.language import detect_language_code
 from pdf_to_jats.models.affiliation import Affiliation
-from pdf_to_jats.models.author import Author
+from pdf_to_jats.models.author import Author, AuthorName
 from pdf_to_jats.models.block import TextBlock, reading_order_key
 
 # "Nahas, S.J.1; Zhao, Y.2" — conference supplements put the surname first and
@@ -163,6 +166,149 @@ class AuthorLinker:
     def link(self, authors_text: list[str], affiliations_text: list[str]) -> LinkedAuthors:
         return self.link_from_texts(authors_text, affiliations_text)
 
+    @staticmethod
+    def _is_latin_author_block(text: str) -> bool:
+        """True when an author presentation is mainly in Latin characters."""
+        value = str(text or "")
+        if detect_language_code(value, default="UND") == "ENG":
+            return True
+        latin = len(re.findall(r"[A-Za-z]", value))
+        other_letters = len(re.findall(r"[^\W\d_]", value, flags=re.UNICODE)) - latin
+        return latin >= 2 and latin > other_letters
+
+    def _merge_byline_variants(
+        self, primary: LinkedAuthors, alternate: LinkedAuthors, affiliations_text: list[str]
+    ) -> LinkedAuthors | None:
+        """Merge one native-script byline into the canonical Latin byline."""
+        if not primary.authors or not alternate.authors:
+            return None
+        if len(primary.authors) != len(alternate.authors):
+            return None
+        # Only index pairing is accepted: a repeated byline keeps its order,
+        # so guessing across positions would risk merging different people.
+        for index, (canonical, native) in enumerate(zip(primary.authors, alternate.authors)):
+            if self._author_match_score(canonical, native, index, index) < 6:
+                return None
+        primary_ids = {affiliation.id for affiliation in primary.affiliations}
+        for canonical, native in zip(primary.authors, alternate.authors):
+            if native.display_name and native.display_name != canonical.display_name:
+                canonical.alternate_names.append(
+                    AuthorName(
+                        text=native.display_name,
+                        language=detect_language_code(native.display_name, default="UND"),
+                        given_names=native.given_names,
+                        surname=native.surname,
+                        initials=native.initials,
+                    )
+                )
+            for marker in native.markers:
+                if marker not in canonical.markers:
+                    canonical.markers.append(marker)
+            if not canonical.affiliation_ids and native.affiliation_ids:
+                canonical.affiliation_ids = [
+                    affiliation_id for affiliation_id in native.affiliation_ids
+                    if affiliation_id in primary_ids
+                ]
+            if not canonical.degrees and native.degrees:
+                canonical.degrees = native.degrees
+        primary.issues.append(
+            LinkIssue(
+                severity="info",
+                message=(
+                    "Merged a native-script byline into the canonical Latin names; "
+                    "review the alternate forms before submission"
+                ),
+            )
+        )
+        _ = affiliations_text
+        return primary
+
+    def _author_match_score(self, canonical: Author, native: Author, canonical_index: int, native_index: int) -> int:
+        score = 0
+        if canonical_index == native_index:
+            score += 1
+        canonical_markers = set(canonical.markers)
+        native_markers = set(native.markers)
+        if canonical_markers and native_markers:
+            if canonical_markers & native_markers:
+                score += 6
+            else:
+                score -= 10
+        canonical_affiliations = set(canonical.affiliation_ids)
+        native_affiliations = set(native.affiliation_ids)
+        if canonical_affiliations and native_affiliations:
+            if canonical_affiliations & native_affiliations:
+                score += 3
+            else:
+                score -= 3
+        name_tokens = self._name_tokens(canonical)
+        native_tokens = self._name_tokens(native)
+        if self._tokens_close(self._surname_tokens(canonical), self._surname_tokens(native)):
+            score += 5
+        if self._tokens_close(self._given_tokens(canonical), self._given_tokens(native)):
+            score += 3
+        if name_tokens and native_tokens:
+            overlap = name_tokens & native_tokens
+            score += 2 if len(overlap) >= 2 or len(overlap) / max(len(name_tokens), len(native_tokens)) >= 0.5 else 0
+        return score
+
+    def _name_tokens(self, author: Author) -> set[str]:
+        return set(self._normalize_name_tokens(" ".join((
+            author.given_names, author.surname, author.display_name, author.initials
+        ))))
+
+    def _given_tokens(self, author: Author) -> set[str]:
+        return set(self._normalize_name_tokens(" ".join((author.given_names, author.initials))))
+
+    def _surname_tokens(self, author: Author) -> set[str]:
+        return set(self._normalize_name_tokens(author.surname or author.display_name))
+
+    def _normalize_name_tokens(self, value: str) -> list[str]:
+        transliterated = self._transliterate_to_latin(str(value or "")).casefold()
+        decomposed = unicodedata.normalize("NFKD", transliterated)
+        without_marks = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+        tokens = re.findall(r"[a-z]+", without_marks)
+        return [token for token in tokens if token != "of"]
+
+    @staticmethod
+    def _tokens_close(left: set[str], right: set[str]) -> bool:
+        if not left or not right:
+            return False
+        if left & right:
+            return True
+        return any(
+            difflib.SequenceMatcher(None, left_token, right_token).ratio() >= 0.72
+            for left_token in left for right_token in right
+        )
+
+    @staticmethod
+    def _transliterate_to_latin(value: str) -> str:
+        """Approximate Persian/Arabic script for name matching only."""
+        mapping = {
+            '\u0627': 'a', '\u0622': 'a', '\u0623': 'a', '\u0625': 'a',
+            '\u0628': 'b', '\u067e': 'p', '\u062a': 't', '\u062b': 's',
+            '\u062c': 'j', '\u0686': 'ch', '\u062d': 'h', '\u062e': 'kh',
+            '\u062f': 'd', '\u0630': 'z', '\u0631': 'r', '\u0632': 'z',
+            '\u0698': 'zh', '\u0633': 's', '\u0634': 'sh', '\u0635': 's',
+            '\u0636': 'z', '\u0637': 't', '\u0638': 'z', '\u0639': ' ',
+            '\u063a': 'gh', '\u0641': 'f', '\u0642': 'q', '\u06a9': 'k',
+            '\u06af': 'g', '\u0644': 'l', '\u0645': 'm', '\u0646': 'n',
+            '\u0648': 'v', '\u0647': 'h', '\u06cc': 'y', '\u064a': 'y',
+            '\u0629': '', '\u0624': 'o', '\u0626': 'y', '\u0629': '',
+        }
+        transliterated = []
+        for char in value:
+            if '\u0600' <= char <= '\u06ff' or '\u0750' <= char <= '\u077f' or '\ufb50' <= char <= '\ufdff':
+                if char in {'\u200c', '\u200d', '\u0640', '\u061f'}:
+                    transliterated.append(' ')
+                else:
+                    transliterated.append(mapping.get(char, ''))
+            elif '\u0660' <= char <= '\u0669' or '\u06f0' <= char <= '\u06f9':
+                transliterated.append(str(ord(char) - (0x0660 if '\u0660' <= char <= '\u0669' else 0x06f0)))
+            else:
+                transliterated.append(char)
+        return ''.join(transliterated)
+
     def link_from_blocks(self, author_blocks: list[TextBlock], affiliation_blocks: list[TextBlock]) -> LinkedAuthors:
         """Link authors and affiliations using the original text blocks."""
 
@@ -170,7 +316,45 @@ class AuthorLinker:
         authors_text = [block.text for block in ordered_blocks if block.role != "corresponding_author"]
         corresponding_texts = [block.text for block in ordered_blocks if block.role == "corresponding_author"]
         affiliations_text = [block.text for block in sorted(affiliation_blocks, key=reading_order_key)]
+
+        # Some articles print the same byline twice, once in a native script
+        # and once in Latin characters. Linking the concatenated text would
+        # duplicate every person, so pair the two presentations first.
+        latin_blocks = [
+            block for block in ordered_blocks
+            if block.role != "corresponding_author" and self._is_latin_author_block(block.text)
+        ]
+        native_blocks = [
+            block for block in ordered_blocks
+            if block.role != "corresponding_author" and not self._is_latin_author_block(block.text)
+        ]
+        if latin_blocks and native_blocks:
+            primary = self.link_from_texts(
+                [block.text for block in latin_blocks], affiliations_text
+            )
+            alternate = self.link_from_texts(
+                [block.text for block in native_blocks], affiliations_text
+            )
+            merged = self._merge_byline_variants(primary, alternate, affiliations_text)
+            if merged is not None:
+                merged.corresponding_author = self._find_corresponding_author(
+                    corresponding_texts, merged.authors
+                )
+                if merged.corresponding_author is None and merged.authors:
+                    merged.corresponding_author = merged.authors[0]
+                return merged
+
         linked = self.link_from_texts(authors_text, affiliations_text)
+        if latin_blocks and native_blocks:
+            linked.issues.append(
+                LinkIssue(
+                    severity="warning",
+                    message=(
+                        "Latin and native-script bylines were not safely matched as the "
+                        "same people; check for duplicate authors"
+                    ),
+                )
+            )
         linked.corresponding_author = self._find_corresponding_author(corresponding_texts, linked.authors)
         if linked.corresponding_author is None and linked.authors:
             linked.corresponding_author = linked.authors[0]
@@ -373,11 +557,23 @@ class AuthorLinker:
             name, _ = self._parse_author_chunk(name_text)
             if not name:
                 continue
+            given_names, initials, surname = self._split_name(name)
+            parsed = Author(
+                initials=initials,
+                surname=surname,
+                display_name=name,
+                given_names=given_names,
+            )
             normalized_name = " ".join(name.lower().split())
             for author in authors:
-                if normalized_name == " ".join(author.display_name.lower().split()):
+                forms = [author.display_name, author.given_names, author.surname]
+                forms.extend(alternate.text for alternate in author.alternate_names)
+                if any(normalized_name == " ".join(form.lower().split()) for form in forms if form):
                     return author
-                if author.surname.lower() in normalized_name or normalized_name.endswith(author.surname.lower()):
+                if self._author_match_score(author, parsed, 0, 0) >= 6:
+                    return author
+            for author in authors:
+                if author.surname and author.surname.lower() in normalized_name:
                     return author
         return None
 
@@ -736,8 +932,9 @@ class AuthorLinker:
             return "", []
 
         # A chunk holding nothing but markers ("1,2", "2", "*") is a comma
-        # split artefact that continues the author before it.
-        if not re.search(r"[A-Za-z]", cleaned):
+        # split artefact that continues the author before it. Native-script
+        # names may carry no Latin letters, so test for any alphabet letter.
+        if not re.search(r"[^\W\d_]", cleaned, flags=re.UNICODE):
             markers = self._split_marker_run(cleaned)
             if markers:
                 return "", markers
@@ -821,7 +1018,7 @@ class AuthorLinker:
 
     @staticmethod
     def _has_name_letters(text: str) -> bool:
-        return len(re.findall(r"[A-Za-z]", text)) >= 2
+        return len(re.findall(r"[^\W\d_]", str(text or ""), flags=re.UNICODE)) >= 2
 
     def _resolve_marker_ids(self, markers: list[str], marker_to_id: dict[str, str]) -> list[str]:
         resolved: list[str] = []
@@ -1375,4 +1572,5 @@ class AuthorLinker:
             return False
         # Byline names may be printed entirely in capitals. Capitalization
         # alone is not evidence of noise; the content checks above still apply.
-        return bool(re.search(r"[A-Za-z]", cleaned))
+        # Native-script names carry no Latin letters, so any letter counts here.
+        return bool(re.search(r"[^\W\d_]", cleaned, flags=re.UNICODE))

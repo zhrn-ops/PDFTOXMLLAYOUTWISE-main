@@ -287,11 +287,17 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self.correspondence_details = QListWidget()
         self.correspondence_details.setObjectName('correspondence_details')
         self.correspondence_details.setWordWrap(True)
+        self.correspondence_details.itemDoubleClicked.connect(
+            lambda _item: self.edit_corresponding_author())
         self.correspondence_affiliations = QListWidget()
         self.correspondence_affiliations.setObjectName('correspondence_affiliations')
         self.correspondence_affiliations.setWordWrap(True)
         self.correspondence_affiliations.itemDoubleClicked.connect(
             lambda item: self.edit_affiliation_item(item))
+        correspondence_person_edit = QPushButton("Edit corresponding author")
+        correspondence_person_edit.setObjectName('correspondence_edit_person')
+        correspondence_person_edit.setToolTip("Edit the corresponding author's name and contact fields")
+        correspondence_person_edit.clicked.connect(self.edit_corresponding_author)
         correspondence_edit = QPushButton("Edit affiliation")
         correspondence_edit.setObjectName('correspondence_edit_affiliation')
         correspondence_edit.setToolTip("Edit the selected affiliation's fields")
@@ -306,6 +312,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         correspondence_layout.addWidget(QLabel("Double-click an affiliation to edit its fields."))
         correspondence_layout.addWidget(self.correspondence_affiliations, 1)
         correspondence_buttons = QHBoxLayout()
+        correspondence_buttons.addWidget(correspondence_person_edit)
         correspondence_buttons.addWidget(correspondence_edit)
         correspondence_buttons.addStretch()
         correspondence_layout.addLayout(correspondence_buttons)
@@ -1488,6 +1495,45 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                     self._refresh()
             except ValueError as exc:
                 QMessageBox.warning(self, "Cannot edit author", str(exc))
+        dialog.deleteLater()
+
+    def edit_corresponding_author(self) -> None:
+        """Edit the existing corresponding-author person fields."""
+        if not self.session:
+            return
+        try:
+            values = self.session.corresponding_author_form()
+        except ValueError as exc:
+            self.status.setText(str(exc))
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit corresponding author")
+        dialog.resize(520, 360)
+        layout = QFormLayout(dialog)
+        labels = {'initials': 'Initials', 'degrees': 'Degrees',
+                  'surname': 'Surname', 'given-name': 'Given names',
+                  'given-names': 'Given names', 'string-name': 'Full name',
+                  'suffix': 'Suffix', 'e-address': 'Email',
+                  'email': 'Email', 'phone': 'Phone', 'fax': 'Fax'}
+        fields: dict[str, QLineEdit] = {}
+        for key, value in values.items():
+            label = labels.get(key, key.replace('-', ' ').title())
+            field = QLineEdit(value)
+            field.setObjectName(f"correspondence_{key}")
+            field.setPlaceholderText(label)
+            layout.addRow(label, field)
+            fields[key] = field
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec() == QDialog.Accepted:
+            try:
+                submitted = {key: field.text() for key, field in fields.items()}
+                if self.session.set_corresponding_author_form(submitted):
+                    self._refresh()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Cannot edit corresponding author", str(exc))
         dialog.deleteLater()
 
     def edit_affiliation(self, path) -> None:

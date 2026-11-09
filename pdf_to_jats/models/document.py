@@ -219,6 +219,7 @@ class Document:
                     "display_name": author.display_name,
                     "affiliation_ids": list(author.affiliation_ids),
                     "degrees": author.degrees,
+                    "alternate_names": [asdict(name) for name in author.alternate_names],
                 }
                 for author in self.authors
             ],
