@@ -35,6 +35,13 @@ def synthetic_pdf(tmp_path: Path) -> Path:
     return pdf_path
 
 
+@pytest.fixture
+def corrupt_pdf(tmp_path: Path) -> Path:
+    path = tmp_path / "corrupt.pdf"
+    path.write_bytes(b"this is not a PDF")
+    return path
+
+
 @pytest.mark.cli
 def test_collect_pdfs_expands_files_and_directories(tmp_path: Path, synthetic_pdf: Path):
     sub = tmp_path / "subdir"
@@ -95,3 +102,73 @@ def test_cli_main_exit_codes(tmp_path: Path, synthetic_pdf: Path):
     # Failure case: no matching files
     code_empty = main(["non_existent_folder_xyz/*.pdf"])
     assert code_empty == 1
+
+
+@pytest.mark.cli
+def test_failed_load_clears_previous_document(qapp, synthetic_pdf: Path, corrupt_pdf: Path):
+    """A failed replacement load must not leave the previous article active."""
+    window = MainWindow(headless=True)
+    try:
+        assert window._load_pdf_path(str(synthetic_pdf), wait=True) is None
+        assert window.document is not None
+
+        error = window._load_pdf_path(str(corrupt_pdf), wait=True)
+        assert error
+        assert window.document is None
+        assert window.current_xml_path is None
+        assert window._generated_xml_paths == []
+    finally:
+        window.close()
+
+
+@pytest.mark.cli
+def test_cli_corrupt_pdf_returns_nonzero_without_dialog(
+    tmp_path: Path, corrupt_pdf: Path, capsys
+):
+    """A corrupt input is a per-file failure, not a modal or a success line."""
+    out_dir = tmp_path / "corrupt_out"
+    code = main([str(corrupt_pdf), "-o", str(out_dir), "--flat"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "[FAIL]" in captured.err
+    assert "[OK]" not in captured.out
+    assert not list(out_dir.glob("*.xml"))
+
+
+@pytest.mark.cli
+def test_batch_two_pdfs_does_not_prompt_or_reuse_document(
+    qapp, tmp_path: Path, synthetic_pdf: Path
+):
+    """The second batch input replaces the first without a draft prompt."""
+    second = tmp_path / "second_paper.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 100), "Second Paper on Catalysis", fontsize=18)
+    page.insert_text((72, 200), "Different body text for the second article.", fontsize=10)
+    doc.save(str(second))
+    doc.close()
+
+    converter = Converter(output_dir=tmp_path / "batch_prompt_out")
+    try:
+        first_written = converter.convert(synthetic_pdf, isolate=True)
+        second_written = converter.convert(second, isolate=True)
+        assert first_written and second_written
+        assert first_written[0].read_text(encoding="utf-8") != second_written[0].read_text(
+            encoding="utf-8"
+        )
+        assert converter.window.document is not None
+        assert converter.window.document.metadata["source_pdf"].endswith("second_paper.pdf")
+    finally:
+        converter.window.close()
+
+
+@pytest.mark.cli
+def test_converter_rejects_zero_output(qapp, tmp_path: Path, synthetic_pdf: Path, monkeypatch):
+    """A pipeline that writes nothing is a conversion failure, not success."""
+    converter = Converter(output_dir=tmp_path / "zero_out")
+    try:
+        monkeypatch.setattr(converter.window, "_documents_to_export", lambda _document: [])
+        with pytest.raises(RuntimeError, match="No XML was produced"):
+            converter.convert(synthetic_pdf, isolate=True)
+    finally:
+        converter.window.close()

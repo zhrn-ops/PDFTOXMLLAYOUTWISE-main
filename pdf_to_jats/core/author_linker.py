@@ -28,10 +28,10 @@ import re
 import unicodedata
 from typing import Any
 
+from pdf_to_jats.core.alternate_names import is_alternate_capture, apply_assignments, assigned_names
 from pdf_to_jats.core.auto_refiner import looks_like_address
-from pdf_to_jats.core.language import detect_language_code
 from pdf_to_jats.models.affiliation import Affiliation
-from pdf_to_jats.models.author import Author, AuthorName
+from pdf_to_jats.models.author import Author
 from pdf_to_jats.models.block import TextBlock, reading_order_key
 
 # "Nahas, S.J.1; Zhao, Y.2" — conference supplements put the surname first and
@@ -166,63 +166,6 @@ class AuthorLinker:
     def link(self, authors_text: list[str], affiliations_text: list[str]) -> LinkedAuthors:
         return self.link_from_texts(authors_text, affiliations_text)
 
-    @staticmethod
-    def _is_latin_author_block(text: str) -> bool:
-        """True when an author presentation is mainly in Latin characters."""
-        value = str(text or "")
-        if detect_language_code(value, default="UND") == "ENG":
-            return True
-        latin = len(re.findall(r"[A-Za-z]", value))
-        other_letters = len(re.findall(r"[^\W\d_]", value, flags=re.UNICODE)) - latin
-        return latin >= 2 and latin > other_letters
-
-    def _merge_byline_variants(
-        self, primary: LinkedAuthors, alternate: LinkedAuthors, affiliations_text: list[str]
-    ) -> LinkedAuthors | None:
-        """Merge one native-script byline into the canonical Latin byline."""
-        if not primary.authors or not alternate.authors:
-            return None
-        if len(primary.authors) != len(alternate.authors):
-            return None
-        # Only index pairing is accepted: a repeated byline keeps its order,
-        # so guessing across positions would risk merging different people.
-        for index, (canonical, native) in enumerate(zip(primary.authors, alternate.authors)):
-            if self._author_match_score(canonical, native, index, index) < 6:
-                return None
-        primary_ids = {affiliation.id for affiliation in primary.affiliations}
-        for canonical, native in zip(primary.authors, alternate.authors):
-            if native.display_name and native.display_name != canonical.display_name:
-                canonical.alternate_names.append(
-                    AuthorName(
-                        text=native.display_name,
-                        language=detect_language_code(native.display_name, default="UND"),
-                        given_names=native.given_names,
-                        surname=native.surname,
-                        initials=native.initials,
-                    )
-                )
-            for marker in native.markers:
-                if marker not in canonical.markers:
-                    canonical.markers.append(marker)
-            if not canonical.affiliation_ids and native.affiliation_ids:
-                canonical.affiliation_ids = [
-                    affiliation_id for affiliation_id in native.affiliation_ids
-                    if affiliation_id in primary_ids
-                ]
-            if not canonical.degrees and native.degrees:
-                canonical.degrees = native.degrees
-        primary.issues.append(
-            LinkIssue(
-                severity="info",
-                message=(
-                    "Merged a native-script byline into the canonical Latin names; "
-                    "review the alternate forms before submission"
-                ),
-            )
-        )
-        _ = affiliations_text
-        return primary
-
     def _author_match_score(self, canonical: Author, native: Author, canonical_index: int, native_index: int) -> int:
         score = 0
         if canonical_index == native_index:
@@ -313,48 +256,22 @@ class AuthorLinker:
         """Link authors and affiliations using the original text blocks."""
 
         ordered_blocks = sorted(author_blocks, key=reading_order_key)
-        authors_text = [block.text for block in ordered_blocks if block.role != "corresponding_author"]
         corresponding_texts = [block.text for block in ordered_blocks if block.role == "corresponding_author"]
         affiliations_text = [block.text for block in sorted(affiliation_blocks, key=reading_order_key)]
 
-        # Some articles print the same byline twice, once in a native script
-        # and once in Latin characters. Linking the concatenated text would
-        # duplicate every person, so pair the two presentations first.
-        latin_blocks = [
-            block for block in ordered_blocks
-            if block.role != "corresponding_author" and self._is_latin_author_block(block.text)
-        ]
-        native_blocks = [
-            block for block in ordered_blocks
-            if block.role != "corresponding_author" and not self._is_latin_author_block(block.text)
-        ]
-        if latin_blocks and native_blocks:
-            primary = self.link_from_texts(
-                [block.text for block in latin_blocks], affiliations_text
-            )
-            alternate = self.link_from_texts(
-                [block.text for block in native_blocks], affiliations_text
-            )
-            merged = self._merge_byline_variants(primary, alternate, affiliations_text)
-            if merged is not None:
-                merged.corresponding_author = self._find_corresponding_author(
-                    corresponding_texts, merged.authors
-                )
-                if merged.corresponding_author is None and merged.authors:
-                    merged.corresponding_author = merged.authors[0]
-                return merged
-
+        # Native captures remain whole source blocks until the user assigns them.
+        candidates = [block for block in ordered_blocks if is_alternate_capture(block)]
+        authors_text = [block.text for block in ordered_blocks
+                        if block.role != "corresponding_author" and not is_alternate_capture(block)]
         linked = self.link_from_texts(authors_text, affiliations_text)
-        if latin_blocks and native_blocks:
-            linked.issues.append(
-                LinkIssue(
+        apply_assignments(linked.authors, candidates)
+        for block in candidates:
+            resolved = any(assigned_names(author, linked.authors, [block]) for author in linked.authors)
+            if not resolved:
+                linked.issues.append(LinkIssue(
                     severity="warning",
-                    message=(
-                        "Latin and native-script bylines were not safely matched as the "
-                        "same people; check for duplicate authors"
-                    ),
-                )
-            )
+                    message=f"Unassigned alternate name: {block.text.strip()}. Assign it to an author or keep it as a main author.",
+                ))
         linked.corresponding_author = self._find_corresponding_author(corresponding_texts, linked.authors)
         if linked.corresponding_author is None and linked.authors:
             linked.corresponding_author = linked.authors[0]

@@ -5,12 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 from collections import OrderedDict
 from bisect import bisect_left, bisect_right
+import logging
 from typing import Any
 
 import fitz
 from PySide6.QtCore import QObject, QPointF, QRect, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QBrush, QImage, QPainter, QPen, QPixmap, QShortcut, QKeySequence
 from PySide6.QtWidgets import QApplication, QMenu, QHBoxLayout, QLabel, QPushButton, QRubberBand, QScrollArea, QVBoxLayout, QWidget
+
+
+logger = logging.getLogger(__name__)
 
 
 class _PageRasterWorker(QObject):
@@ -700,16 +704,22 @@ class PDFViewer(QWidget):
             thread.start()
 
     def cleanup(self) -> None:
-        """Cancel and wait for in-flight raster threads before viewer destruction."""
+        """Cancel and wait for in-flight raster threads before viewer destruction.
+
+        A worker may be inside PyMuPDF rendering and cannot be interrupted
+        immediately. Keep ownership of any thread that does not stop within
+        the bounded wait rather than clearing a reference to a live QThread.
+        """
         self._generation += 1
         self._pending_page_renders.clear()
         self._queued_page_renders.clear()
         for thread in list(self._page_render_threads):
             if thread.isRunning():
                 thread.quit()
-                thread.wait(200)
-        self._page_render_threads.clear()
-        self._page_render_workers.clear()
+                if not thread.wait(5000):
+                    logger.warning("PDF raster thread did not stop within cleanup timeout")
+                    continue
+            self._forget_page_render(thread)
 
     def _forget_page_render(self, thread: QThread) -> None:
         if thread in self._page_render_threads:

@@ -68,7 +68,8 @@ def test_golden_scientific_document_structure(tmp_path: Path):
         paragraphs=[
             Paragraph(
                 id="p1", page=1, column=0, status="accepted", role="body",
-                text="Experiments were performed under steady-state conditions."
+                text="Experiments were performed under steady-state conditions.",
+                bbox=[0.0, 0.0, 500.0, 14.0],
             )
         ],
         metadata={
@@ -79,8 +80,8 @@ def test_golden_scientific_document_structure(tmp_path: Path):
             "abstract_number": "P-101",
             "title_script_runs": [
                 {"start": 22, "end": 24, "type": "sup", "text": "2+", "source": "geometry"},
-                {"start": 36, "end": 37, "type": "sub", "text": "2", "source": "geometry"},
-                {"start": 53, "end": 56, "type": "sub", "text": "max", "source": "manual"},
+                {"start": 37, "end": 38, "type": "sub", "text": "2", "source": "geometry"},
+                {"start": 54, "end": 57, "type": "sub", "text": "max", "source": "manual"},
             ],
             "abstract_script_runs": [
                 {"start": 17, "end": 18, "type": "sub", "text": "2", "source": "lexicon"},

@@ -49,9 +49,9 @@ def test_generator_writes_primary_and_translated_titles():
     root = etree.fromstring(JATSGenerator().to_bytes(document))
     titles = root.findall(f".//{{{ANI_NS}}}titletext")
 
-    assert [title.text for title in titles] == [PERSIAN_TITLE, ENGLISH_TITLE]
-    assert [title.get(XML_LANG) for title in titles] == ["FAS", "ENG"]
-    assert [title.get("original") for title in titles] == ["y", "n"]
+    assert [title.text for title in titles] == [ENGLISH_TITLE, PERSIAN_TITLE]
+    assert [title.get(XML_LANG) for title in titles] == ["ENG", "FAS"]
+    assert [title.get("original") for title in titles] == ["n", "y"]
 
 
 def test_capture_exports_the_page_four_title_as_a_translation():
@@ -82,14 +82,14 @@ def test_capture_exports_the_page_four_title_as_a_translation():
     xml_text = JATSGenerator().to_string(exported)
     root = etree.fromstring(xml_text.encode())
     titles = root.findall(f".//{{{ANI_NS}}}titletext")
-    assert [title.text for title in titles] == [PERSIAN_TITLE, ENGLISH_TITLE]
-    assert [title.get(XML_LANG) for title in titles] == ["FAS", "ENG"]
+    assert [title.text for title in titles] == [ENGLISH_TITLE, PERSIAN_TITLE]
+    assert [title.get(XML_LANG) for title in titles] == ["ENG", "FAS"]
 
     # The correction workspace must see the translated title without the user
     # having to paste it in by hand.
     session = XmlDocumentSession.from_text(xml_text, Path("article.xml"))
     assert [title["text"] for title in session.titles()] == [
-        PERSIAN_TITLE,
         ENGLISH_TITLE,
+        PERSIAN_TITLE,
     ]
-    assert [title["language"] for title in session.titles()] == ["FAS", "ENG"]
+    assert [title["language"] for title in session.titles()] == ["ENG", "FAS"]

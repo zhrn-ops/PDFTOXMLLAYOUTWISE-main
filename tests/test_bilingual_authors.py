@@ -32,7 +32,7 @@ def test_native_script_names_are_parsed_as_authors():
     assert [author.affiliation_ids for author in linked.authors] == [["1"], ["2"]]
 
 
-def test_duplicate_native_and_latin_bylines_merge_into_one_author():
+def test_manually_assigned_native_names_export_with_the_selected_author():
     persian_first = _block("p1", "علی رضایی1", 1, page=1)
     persian_second = _block("p2", "سارا محمدی2", 2, page=1)
     english_first = _block("e1", "Ali Rezaei1", 3, page=4)
@@ -40,6 +40,9 @@ def test_duplicate_native_and_latin_bylines_merge_into_one_author():
     affiliation = _block(
         "a1", "1 Alpha University; 2 Beta University", 5, role="affiliation"
     )
+
+    persian_first.metadata['alternate_name_target'] = 'Ali Rezaei'
+    persian_second.metadata['alternate_name_target'] = 'Sara Mohammadi'
 
     linked = AuthorLinker().link_from_blocks(
         [persian_first, persian_second, english_first, english_second],
@@ -54,7 +57,7 @@ def test_duplicate_native_and_latin_bylines_merge_into_one_author():
     assert [
         [name.text for name in author.alternate_names]
         for author in linked.authors
-    ] == [["علی رضایی"], ["سارا محمدی"]]
+    ] == [[persian_first.text], [persian_second.text]]
 
     document = Document(
         title="Modern Care",
@@ -65,9 +68,12 @@ def test_duplicate_native_and_latin_bylines_merge_into_one_author():
     root = etree.fromstring(JATSGenerator().to_bytes(document))
     authors = root.findall(f".//{{{JATSGenerator.ANI_NS}}}author")
 
-    # The native forms are retained for review, but ANI still gets one
-    # exported author per person and no invented alternate-name element.
+    # ANI still gets one exported author per person; the native form is
+    # exported beside the English name as ce:alt-name.
     assert len(authors) == 2
+    assert [
+        author.findtext(f"{{{JATSGenerator.CE_NS}}}alt-name") for author in authors
+    ] == [persian_first.text, persian_second.text]
     assert not any(
         isinstance(node.tag, str) and node.tag.rsplit('}', 1)[-1] == 'name-script'
         for node in root.iter()
@@ -91,7 +97,7 @@ def test_disjoint_markers_do_not_merge_different_bylines():
         [affiliation],
     )
 
-    # Different affiliation markers mean these may be different people, so the
-    # conservative behavior is to keep both lists and warn for review.
-    assert len(linked.authors) == 4
-    assert any("not safely matched" in issue.message for issue in linked.issues)
+    # Native captures are pending user assignment, never separate authors.
+    assert len(linked.authors) == 2
+    assert all(not author.alternate_names for author in linked.authors)
+    assert sum("Unassigned alternate name" in issue.message for issue in linked.issues) == 2

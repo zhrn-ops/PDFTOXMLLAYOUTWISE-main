@@ -1,46 +1,84 @@
-# Baseline test results and audit probes
+# Test results — Phase 0 baseline snapshot
 
-Date: 2026-11-09. The baseline below is preserved from Phases 0–1. Approved Phase 2 verification is recorded in [phase_02_implementation.md](phase_02_implementation.md): **488 passed in 22.79 seconds**, including 36 new regression cases.
+Snapshot: **2026-11-10 14:45**. These are executed results for the current working tree, not projected results. The tree changed during the audit (concurrent title/alternate-name edits at 14:35–14:36); the test count grew from 579 to 586. No test source was modified by this audit. An audit-only `QMessageBox` stub under `.audit_tmp/` was used to expose behavior underneath modal dialogs; it is not part of the repository.
 
-## Existing automated suite
+## Commands and outcomes
 
-`python -m compileall -q pdf_to_jats tests` completed with exit 0. No syntax errors were printed.
+| Command | Result |
+|---|---|
+| `python -m compileall -q pdf_to_jats tests` | Exit **0**; no syntax errors |
+| `python -m pip check` | No broken requirements |
+| `python -m pytest tests -q --collect-only` | **586 tests collected** |
+| `QT_QPA_PLATFORM=offscreen python -m pytest -q tests -p no:cacheprovider` | **Did not terminate** (three modal-blocked tests) |
+| Same, with the three blocking tests deselected | **580 passed, 3 failed, 3 deselected in 27.49 s** |
+| `tests/test_cli_workflow.py` + `tests/test_process_lifecycle.py` with the audit `QMessageBox` stub | **4 passed, 3 failed in 2.48 s** |
 
-Successful PowerShell invocation (fresh GUID-named directory each run):
+The standard suite is **not green**. The three failures are real for this snapshot; two are stale test code, one is a CLI contract defect.
 
-```powershell
-$env:QT_QPA_PLATFORM = 'offscreen'
-$auditTemp = Join-Path (Get-Location) ('output\audit-tests-' + [guid]::NewGuid().ToString('N'))
-python -m pytest -q tests -p no:cacheprovider --basetemp $auditTemp --tb=short
+## Failures
+
+### 1. Golden structural test — stale model fixture
+
+```
+tests/test_golden_structural.py::test_golden_scientific_document_structure
+TypeError: Paragraph.__init__() missing 1 required positional argument: 'bbox'
+tests/test_golden_structural.py:69
 ```
 
-This run needed approved execution outside the restricted sandbox because Python-created pytest temporary directories were inaccessible inside it. It used the same installed Python/dependencies and unchanged tests.
+`Paragraph.bbox` is a required field (`pdf_to_jats/models/paragraph.py:16`); the fixture omits it. Test defect, not a production defect (C06).
 
-**452 passed in 18.44 seconds; 0 failed, 0 errors, 0 skipped; no warnings reported; exit 0.**
+### 2. Viewer cleanup test — nonexistent API
 
-Earlier attempts are recorded in `00_baseline_report.md`: default discovery had 1 collection error and 2 cache warnings; explicit `tests/` had 346 passes and 106 temp-directory setup errors; changing basetemp alone did not resolve sandbox permissions. These failures are retained as evidence, not reclassified as application assertions.
+```
+tests/test_process_lifecycle.py::test_viewer_cleanup_cancels_in_flight_raster_threads
+AttributeError: 'PDFViewer' object has no attribute 'set_visible_range'
+tests/test_process_lifecycle.py:66
+```
 
-Tests added or changed: **none**. Existing failing tests deleted/skipped: **none**. Source fixes: **none**. A full per-file collected-test count and module listing is recorded in `repository_inventory.md`.
+`PDFViewer` never exposed `set_visible_range`; the name appears only in the test commit. The test therefore provides no coverage for `PDFViewer.cleanup` (C05/C06).
 
-## Executed targeted audit probes
+### 3. CLI exit code — success with zero output
 
-These short API-level experiments supplement the suite. They demonstrate current behavior; they are **not newly passing regression tests**. All XML and write-failure content was synthetic. No actual source XML was overwritten. The temporary audit XML file was removed after use.
+```
+tests/test_cli_workflow.py::test_cli_main_exit_codes
+AssertionError: main(...) returned 0; out_dir.glob('*.xml') is empty
+stdout: [OK] sample_paper.pdf | 7 blocks | no review flags | 0 XML file(s)
+```
 
-| Probe | Observed result | Finding |
+`tests/test_cli_workflow.py::test_cli_converter_end_to_end` fails the same way (`0` written files) when the modal close is stubbed. Root cause: `run_auto_pipeline` returns silently when no article is started, and `Converter.convert` checks only for a non-`None` document (C04).
+
+## Modal-blocked tests (hang)
+
+| Test | Faulthandler endpoint | Under `QMessageBox` stub |
 |---|---|---|
-| Legacy validator with metadata-complete article and nonexistent XSD | `[]` | A01 |
-| Same document through correction validation | `info: XML is well-formed`; `info: Schema validation unavailable...`; existing GUI status expression evaluates to `Valid` | A01 |
-| Bind CLI's `wait=True` call to actual loader | `TypeError: MainWindow._load_pdf_path() got an unexpected keyword argument 'wait'` | A05 |
-| ISO-8859-1 title through `xml_text()` then `from_text()` | `'Caf\xe9'` → `'Caf\xc3\xa9'` | A02 |
-| Adjacent inline formula through session serialization | `'H2O'` → `'\nH\n2\nO\n'` | A03 |
-| Space-separated inline text through session serialization | `'A B'` → `'\nA\nB\n'` | A03 |
-| Generator with an accepted `xn` body paragraph and matching geometry `sub` run for `n` | 0 `ce:inf` elements | A06 |
-| Generator write patched to write 10 bytes then raise disk-full OSError | Previous destination replaced by `b'<?xml vers'` | A04 |
+| `test_cli_workflow.py::test_load_pdf_path_wait_parameter_completes_extraction` | `article_drafts.py:163 confirm_close_drafts` ← `main_window.py:259 closeEvent` | **Passed** — the prior `wait=True` `TypeError` is fixed; only the close prompt hangs |
+| `test_cli_workflow.py::test_cli_converter_end_to_end` | Same close path | **Failed** on the zero-output assertion (C04) |
+| `test_process_lifecycle.py::test_article_finish_drops_stale_response_on_generation_mismatch` | Same close path | **Passed** — stale-generation rejection works |
 
-The CLI probe establishes the signature defect without running extraction, network calls or GUI dialogs. The GUI status probe evaluates its exact status rule from produced issues; it is not a manual interactive UI acceptance test. The interrupted-write probe injects failure rather than filling the user's disk.
+Root cause: a freshly loaded PDF is treated as unsaved work (`_saved_workspace` is `None`), so `closeEvent` and opening a second PDF prompt modally (C02).
 
-## Required follow-up validation
+## Audit probes
 
-Promote the reproduction cases into regressions only with the approved fixes. Add secure profile-specific schema tests, strict vs draft export tests, non-UTF-8 workspace/history transitions, mixed-content structural comparisons, transport failures and cancellation. The existing passing suite already checks corrected draft retention, conflict refusal/archive, source protection, missing raw parse recovery, numeric scripts and external-entity non-resolution; preserve that coverage.
+| Probe | Result |
+|---|---|
+| Load valid PDF, then close | `document_loaded True`, `session False`, prompt `['Save article drafts?']` |
+| Load valid PDF, then second valid PDF | First: 0 prompts; second: 1 prompt |
+| Load valid PDF, then corrupt PDF | `document is None? False`; stale source remains; `QMessageBox.critical('PDF Load Error')` called |
+| CLI `Converter` on a simple PDF, no manual article start | No exception; `0 XML file(s)`; `main(...) == 0` |
+| `PDFViewer.cleanup` inspection | `thread.wait(200)` result ignored; thread maps cleared unconditionally (static) |
 
-No official publisher validation, live provider integration, performance benchmark, vulnerability scan or cross-version build was executed. No claims are made for those gates.
+No real API key was read or written; no live network service was contacted (the test fixture denies external sockets); no real document was overwritten. Probe files were synthetic and confined to `.audit_tmp/`.
+
+## Passing areas (executed)
+
+- `tests/test_xml_validation_export.py` — **36 passed** (structured well-formed/schema/unavailable results, draft vs validated export, schema-path containment).
+- `tests/test_xml_revision_integrity.py` — **15 passed** (exact-byte revisions, atomic/no-clobber publication).
+- Comment/PI/unknown-node preservation, inline mixed-content serialization, non-UTF-8 decoding, draft/session, author/affiliation, and country/alternate-name tests all passed in the terminating run.
+- All 50 test modules import; no collection errors.
+
+## Limitations
+
+- No performance benchmark, vulnerability scan, live-service test, or real-publisher-schema validation was run.
+- No real scientific PDF corpus was used, so extraction/layout accuracy is not measured.
+- The full suite cannot be executed end-to-end without either deselecting the modal-blocked tests or supplying a dialog stub; the standard result is “does not terminate”.
+- The working tree changed during the audit; re-run before acting. No production-readiness or schema-validity certification is claimed.

@@ -6,8 +6,11 @@ from dataclasses import dataclass, replace
 from copy import deepcopy
 from pathlib import Path
 import re
+import unicodedata
 
 from lxml import etree
+from pdf_to_jats.core.country_codes import country_code, normalize_country_elements
+from pdf_to_jats.core.title_order import english_titles_first, non_english_title, remove_title_scripts
 from pdf_to_jats.core.atomic_io import atomic_write_bytes
 from pdf_to_jats.core.xml_revisions import XmlRevision, validation_record
 from pdf_to_jats.core.xml_validation import (
@@ -279,6 +282,32 @@ class XmlDocumentSession:
     def author_name(node) -> str:
         parts = [" ".join("".join(c.itertext()).split()) for c in XmlDocumentSession._author_name_parts(node)]
         return " ".join(part for part in parts if part)
+
+    @staticmethod
+    def _whole_name_text(node) -> str:
+        """Read a name as one string, even when it holds name-section children."""
+
+        return " ".join(" ".join(node.itertext()).split())
+
+    @staticmethod
+    def author_alt_names(node) -> list[str]:
+        """Read the alternate-language names (``ce:alt-name``) of an author.
+
+        Alternate names are captured whole, never as separate name sections.
+        """
+
+        container = next(
+            (child for child in node
+             if isinstance(child.tag, str) and etree.QName(child).localname == "name"),
+            node,
+        )
+        names = []
+        for child in container:
+            if isinstance(child.tag, str) and etree.QName(child).localname == "alt-name":
+                text = XmlDocumentSession._whole_name_text(child)
+                if text:
+                    names.append(text)
+        return names
 
     @staticmethod
     def _affiliation_label(node) -> str:
@@ -607,6 +636,27 @@ class XmlDocumentSession:
         ordinals = sorted(int(key.partition(':')[2] or '1') for key in organization_keys)
         if ordinals != list(range(1, len(organization_keys) + 1)):
             raise ValueError("Affiliation fields changed; reopen the editor")
+        values = dict(values)
+        for key in list(values):
+            if key.partition(':')[0] != 'country' or '@' in key:
+                continue
+            iso_key = key + '@iso-code'
+            name_changed = values[key] != old.get(key, '')
+            code_changed = values.get(iso_key, '') != old.get(iso_key, '')
+            if not name_changed and not code_changed:
+                continue
+            raw = values.get(iso_key, '') if code_changed else values[key]
+            if not raw.strip():
+                raw = values[key] if code_changed else values.get(iso_key, '')
+            if raw.strip():
+                code = country_code(raw)
+                if not code:
+                    raise ValueError(f'Country {raw!r} needs review: enter a valid three-letter code.')
+                if name_changed and code_changed and values[key].strip() and values.get(iso_key, '').strip():
+                    if country_code(values[key]) != code:
+                        raise ValueError('Country name and code disagree; correct the country field.')
+                values[key] = ''
+                values[iso_key] = code
         if old == values:
             return False
         # Validate all changes before touching XML, preserving nested markup.
@@ -692,6 +742,8 @@ class XmlDocumentSession:
         node = self.title_node() if field == "title" else self.abstract_node()
         if node is None:
             raise ValueError("No editable field found")
+        if field == "title" and tag != "normal" and non_english_title(self.title_language()):
+            raise ValueError("Superscript and subscript are allowed only for English titles")
         allowed = {"p", "para", "abstract", "abstracts", "sup", "inf", "sub"}
         if any(self._local_name(child) not in allowed for child in node.iter() if child is not node):
             raise ValueError("This field contains formatting that cannot safely be changed here")
@@ -749,6 +801,8 @@ class XmlDocumentSession:
             # The title element must not keep an older language that would
             # override the group it now belongs to.
             node.attrib.pop(attribute, None)
+        if non_english_title(language):
+            remove_title_scripts(node)
         self.dirty = True
         self.validation = []
 
@@ -951,7 +1005,10 @@ class XmlDocumentSession:
             target = next((c for c in parts if etree.QName(c).localname == "surname"), None)
         if target is None:
             raise ValueError("Author name has no safely editable name element")
+        key = self._local_name(target)
+        plans = self._prepare_person_updates(node, {key: ''.join(target.itertext())}, {key: value})
         self._set_text(target, value)
+        self._commit_person_updates(plans)
 
     def set_author_name_parts(self, index: int, values: list[str]) -> bool:
         """Edit existing name fields without parsing a combined display name."""
@@ -964,12 +1021,18 @@ class XmlDocumentSession:
             raise ValueError("This name field contains inline formatting; edit it in Raw XML to preserve its markup")
         if changes and not any(value.strip() for value in values):
             raise ValueError("An author must have at least one non-empty name field")
+        plans = self._prepare_person_updates(
+            self.authors()[index],
+            {self._local_name(node): ''.join(node.itertext()) for node in parts},
+            {self._local_name(node): value for node, value in zip(parts, values)},
+        )
         for node, value in changes:
             self._set_text(node, value)
+        self._commit_person_updates(plans)
         return bool(changes)
 
     AUTHOR_NAME_FIELDS = ('initials', 'degrees', 'surname', 'given-name',
-                          'suffix', 'e-address')
+                          'suffix', 'e-address', 'alt-name')
     AUTHOR_ATTRIBUTES = ('seq', 'author-instance-id', 'orcid')
     AUTHOR_FIELD_ALIASES = {'given-name': ('given-name', 'given-names')}
     PERSON_NAME_FIELDS = AUTHOR_NAME_FIELDS + ('email', 'phone', 'fax')
@@ -991,7 +1054,12 @@ class XmlDocumentSession:
         }
         for child in node:
             if isinstance(child.tag, str) and etree.QName(child).localname in self.AUTHOR_NAME_FIELDS:
-                fields.setdefault(etree.QName(child).localname, ''.join(child.itertext()))
+                local = etree.QName(child).localname
+                fields.setdefault(
+                    local,
+                    self._whole_name_text(child) if local == 'alt-name'
+                    else ''.join(child.itertext()),
+                )
         for part in self._author_name_parts(node):
             fields.setdefault(etree.QName(part).localname, ''.join(part.itertext()))
         for name in self.AUTHOR_NAME_FIELDS:
@@ -1008,7 +1076,134 @@ class XmlDocumentSession:
             None,
         )
 
+    @staticmethod
+    def _person_key(value):
+        return ' '.join(unicodedata.normalize('NFC', value).casefold().split())
+
+    def _person_identity(self, node):
+        fields = {}
+        for part in self._author_name_parts(node):
+            key = self._local_name(part)
+            fields['given-name' if key == 'given-names' else key] = self._person_key(''.join(part.itertext()))
+        return fields
+
+    def _person_scope(self, node):
+        return next((parent for parent in node.iterancestors()
+                     if self._local_name(parent) in {'head', 'article', 'unit'}), self.tree.getroot())
+
+    def _matching_people(self, source):
+        scope = self._person_scope(source)
+        people = self.authors() + [node for node in self.tree.iter()
+                  if self._local_name(node) == 'person'
+                  and self._local_name(node.getparent()) == 'correspondence']
+        people = [node for node in people if self._person_scope(node) is scope]
+        identity = self._person_identity(source)
+        matches = []
+        for target in people:
+            if target is source:
+                continue
+            # Explicit conflicting identifiers take precedence over a shared name.
+            ids = ('orcid', 'author-instance-id')
+            if any(source.get(key) and target.get(key) and source.get(key) != target.get(key) for key in ids):
+                continue
+            if any(source.get(key) and source.get(key) == target.get(key) for key in ids):
+                matches.append(target)
+                continue
+            other = self._person_identity(target)
+            if identity.get('string-name') and identity.get('string-name') == other.get('string-name'):
+                matches.append(target)
+                continue
+            if not identity.get('surname') or identity.get('surname') != other.get('surname'):
+                continue
+            given, other_given = identity.get('given-name'), other.get('given-name')
+            if given and other_given:
+                if given == other_given:
+                    matches.append(target)
+                continue
+            initials = identity.get('initials')
+            if not initials or initials != other.get('initials'):
+                continue
+            # Initial-only records cannot select between Alice and Andrew Smith.
+            names = {item.get('given-name') for node in people
+                     if (item := self._person_identity(node)).get('surname') == identity['surname']
+                     and item.get('initials') == initials and item.get('given-name')}
+            if len(names) <= 1:
+                matches.append(target)
+        return matches
+
+    def _prepare_person_updates(self, source, old, values):
+        changes = {key: value for key, value in values.items()
+                   if value != old.get(key, '') and (not key.startswith('@') or key == '@orcid')}
+        if not changes:
+            return []
+        plans = []
+        for target in self._matching_people(source):
+            clone = deepcopy(target)
+            container = next((child for child in clone if self._local_name(child) == 'name'), clone)
+            children = [child for child in container if isinstance(child.tag, str)]
+            namespace = etree.QName(children[0]).namespace if children else (
+                ANI_CE_NS if self.profile == 'ANI' else etree.QName(target).namespace)
+            for key, value in changes.items():
+                if key == '@orcid':
+                    if value:
+                        clone.set('orcid', value)
+                    else:
+                        clone.attrib.pop('orcid', None)
+                    continue
+                # Phone/fax are correspondence-specific, not author name fields.
+                if key not in self.AUTHOR_NAME_FIELDS and key not in {'given-names', 'string-name', 'email'}:
+                    continue
+                canonical = {'given-names': 'given-name', 'email': 'e-address'}.get(key, key)
+                existing = self._person_field_node(container, canonical)
+                if existing is not None:
+                    current = self._whole_name_text(existing) if canonical == 'alt-name' else ''.join(existing.itertext())
+                    if current == value:
+                        continue
+                    if len(existing) and canonical != 'alt-name':
+                        raise ValueError('A matching author contains inline formatting; use Raw XML to preserve its markup')
+                    for child in list(existing):
+                        existing.remove(child)
+                    existing.text = value
+                elif value:
+                    tag = 'given-names' if canonical == 'given-name' and self.profile != 'ANI' else canonical
+                    child = etree.Element(f'{{{namespace}}}{tag}' if namespace else tag)
+                    child.text = value
+                    rank = self.AUTHOR_NAME_FIELDS.index(canonical) if canonical in self.AUTHOR_NAME_FIELDS else 0
+                    position = next((i for i, item in enumerate(container)
+                                     if self._local_name(item) in self.AUTHOR_NAME_FIELDS
+                                     and self.AUTHOR_NAME_FIELDS.index(self._local_name(item)) > rank), len(container))
+                    container.insert(position, child)
+            plans.append((target, clone))
+        return plans
+
+    @staticmethod
+    def _commit_person_updates(plans):
+        for target, clone in plans:
+            target.attrib.clear()
+            target.attrib.update(clone.attrib)
+            target.text = clone.text
+            for child in list(target):
+                target.remove(child)
+            for child in list(clone):
+                target.append(child)
+
     def set_author_form(self, index: int, values: dict[str, str]) -> bool:
+        plans = self._prepare_person_updates(self.authors()[index], self.author_form(index), values)
+        changed = self._set_author_form_single(index, values)
+        if changed:
+            self._commit_person_updates(plans)
+        return changed
+
+    def set_corresponding_author_form(self, values: dict[str, str]) -> bool:
+        person, _, _ = self.correspondence()
+        old = self.corresponding_author_form()
+        plans = self._prepare_person_updates(person, old, values)
+        changed = self._set_corresponding_author_form_single(values)
+        if changed:
+            self._commit_person_updates(plans)
+        return changed
+
+    def _set_author_form_single(self, index: int, values: dict[str, str]) -> bool:
         """Apply the author form, creating missing ANI person fields on demand."""
         node = self.authors()[index]
         old = self.author_form(index)
@@ -1035,7 +1230,7 @@ class XmlDocumentSession:
             if key.startswith('@') or value == old.get(key, ''):
                 continue
             existing = self._author_field_node(container, key)
-            if existing is not None and len(existing):
+            if existing is not None and len(existing) and key != 'alt-name':
                 raise ValueError(
                     f"{key} contains inline formatting; use Raw XML to preserve its markup")
         children = [child for child in container if isinstance(child.tag, str)]
@@ -1055,7 +1250,14 @@ class XmlDocumentSession:
                 continue
             existing = self._author_field_node(container, key)
             if existing is not None:
-                if value != ''.join(existing.itertext()):
+                current = (self._whole_name_text(existing) if key == 'alt-name'
+                           else ''.join(existing.itertext()))
+                if value != current:
+                    if key == 'alt-name':
+                        # An alternate name is one whole name; drop any name
+                        # sections the document carried before replacing it.
+                        for child in list(existing):
+                            existing.remove(child)
                     existing.text = value
                     changed = True
                 continue
@@ -1098,7 +1300,7 @@ class XmlDocumentSession:
             values.setdefault(name, "")
         return values
 
-    def set_corresponding_author_form(self, values: dict[str, str]) -> bool:
+    def _set_corresponding_author_form_single(self, values: dict[str, str]) -> bool:
         """Edit the corresponding-author person without recreating correspondence."""
         person, _details, _affiliations = self.correspondence()
         if person is None:
@@ -1120,7 +1322,7 @@ class XmlDocumentSession:
             if value == old.get(key, ''):
                 continue
             existing = self._person_field_node(container, key)
-            if existing is not None and len(existing):
+            if existing is not None and len(existing) and key != 'alt-name':
                 raise ValueError(
                     f"{key} contains inline formatting; use Raw XML to preserve its markup")
         children = [child for child in container if isinstance(child.tag, str)]
@@ -1130,7 +1332,12 @@ class XmlDocumentSession:
         for key, value in values.items():
             existing = self._person_field_node(container, key)
             if existing is not None:
-                if value != ''.join(existing.itertext()):
+                current = (self._whole_name_text(existing) if key == 'alt-name'
+                           else ''.join(existing.itertext()))
+                if value != current:
+                    if key == 'alt-name':
+                        for child in list(existing):
+                            existing.remove(child)
                     existing.text = value
                     changed = True
                 continue
@@ -1346,6 +1553,8 @@ class XmlDocumentSession:
         # Text-bearing/inline elements are left intact so meaningful spacing
         # inside mixed content is never rewritten by line breaks.
         tree = deepcopy(self.tree)
+        english_titles_first(tree.getroot())
+        normalize_country_elements(tree.getroot(), strict=False)
         inline = {"p", "para", "titletext", "source-text", "organization",
                   "address-part", "city", "state", "postal-code", "keyword",
                   "kwd", "keywd", "italic", "sub", "sup", "inf", "mi", "mo",
@@ -1391,6 +1600,10 @@ class XmlDocumentSession:
         if self.profile == "Unknown":
             issues.append(Issue("warning", "Document profile is unknown; structured mappings are limited"))
         semantic_start = len(issues)
+        try:
+            normalize_country_elements(deepcopy(self.tree).getroot())
+        except ValueError as exc:
+            issues.append(Issue('error', str(exc), field='country'))
         if not self.title().strip():
             issues.append(Issue("warning", "Missing or empty title", field="title"))
         if not self.authors():
@@ -1423,11 +1636,18 @@ class XmlDocumentSession:
             raise ValueError("Validate the current XML before exporting a copy")
         if not self.raw_valid:
             raise ValueError("Fix the raw XML parse error before exporting a copy")
+        country_tree = deepcopy(self.tree)
+        normalize_country_elements(country_tree.getroot())
         if encoding:
-            tree = deepcopy(self.tree)
+            tree = country_tree
+            english_titles_first(tree.getroot())
             data = etree.tostring(tree, encoding=encoding, xml_declaration=True)
         else:
-            data = self.xml_bytes()
+            # Keep the same formatting as normal serialization, then normalize
+            # structured countries without rewriting preserved source-text.
+            export_root = etree.fromstring(self.xml_bytes(), self.parser)
+            normalize_country_elements(export_root)
+            data = etree.tostring(export_root, encoding=self.encoding, xml_declaration=True)
         # Recheck schema resources at strict export: selected files may have
         # changed or disappeared since the user pressed Validate.
         if ExportMode(mode) == ExportMode.VALIDATED:

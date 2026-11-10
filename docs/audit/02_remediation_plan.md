@@ -1,62 +1,126 @@
-# Prioritized remediation plan
+# Remediation plan (Phase 2 onward)
 
-Date: 2026-11-09. Phases 0 and 1 are complete within the documented audit limits. All items below are proposals, not implemented changes. Stop at each major phase for approval as requested.
+Snapshot: **2026-11-10 14:45**. This plan is based on `00_baseline_report.md` and `01_code_audit.md`. **No production logic was changed in Phases 0–1.** The working tree already contains earlier Phase 2/3 work plus concurrent title/alternate-name edits; this plan does not redo them and does not assume they are committed.
 
-Update: Phase 2 was implemented (see [Phase 2 implementation report](phase_02_implementation.md)). Phase 3 was approved and implemented; see [Phase 3 implementation report](phase_03_implementation.md). The original plan below is retained for traceability. Phase 4 and later still require separate approval.
+## Current state to account for
 
-## Phase 2: validation and export safety (recommended next approval)
+- The XML validation/revision/export work described in `phase_02_implementation.md` and `phase_03_implementation.md` is **already implemented in the working tree** (uncommitted). Focused suites pass: 36 `test_xml_validation_export.py`, 15 `test_xml_revision_integrity.py`, plus comment/session/draft tests.
+- The tree also contains concurrent uncommitted bilingual/alternate-name/country/title-language work that appeared during the audit. Treat it as a separate change set.
+- Therefore the next approved phase should **not** start by re-implementing Phase 2. It should first stabilize the uncommitted work, then fix the P1 lifecycle/CLI blockers, then harden tests.
 
-Affected files: `core/validator.py`, `core/xml_correction.py`, `core/jats_generator.py`, `gui/xml_correction_window.py`, relevant legacy export paths in `gui/main_window.py`, and focused new tests.
+Recommended gate order: **stabilize → P1 blockers → test infrastructure → hardening → performance/accuracy → architecture → packaging**. Do not start performance or refactoring work before C01–C04 and C06/C12 are closed.
 
-1. Introduce a shared typed validation result. Keep well-formedness (`WELL_FORMED`, `NOT_WELL_FORMED`), schema (`SCHEMA_VALID`, `SCHEMA_INVALID`, `SCHEMA_UNAVAILABLE`) and semantic issues independent. Include profile/schema identity and a fingerprint of the exact XML bytes evaluated. Missing schema must never produce schema-valid status.
-2. Detect/select actual JATS vs ANI/CAR profiles; require trusted local complete schema resources for publisher validation. Ignore untrusted remote schemaLocation as an instruction to fetch. A small synthetic XSD is appropriate for tests only. Obtaining the receiving team's authoritative ANI schema/rules is necessary for real validated ANI delivery, but does not block implementing truthful unavailable status.
-3. Explicitly retain draft export, show unresolved issues and publisher incompleteness, and add a separate strict validated export. The existing `Validate & Export` behavior is effectively provisional; migrate it visibly rather than silently making it strict or calling it publisher-valid.
-4. Centralize byte preparation and atomic publication. Cover the direct generator/legacy export paths as well as correction copies (A04). Strict export evaluates exact bytes before replacement; draft export still rejects malformed XML. Preserve source protection and overwrite decisions.
-5. Treat A03 serializer text mutation as a Phase 2 integrity prerequisite: validation/export must operate on the accepted text and markup, not a reformatted scientific token stream. Add encoding-safe byte boundaries from A02 where shared validation/export requires them; complete activation/history integration in Phase 3.
+---
 
-Acceptance: malformed XML cannot export; missing/wrong schemas cannot pass strict export; draft XML remains available with honest status; schema success is profile-specific; edits invalidate results; mixed-content text survives; injected failures preserve existing files. Run focused tests after each small change, then all 452 baseline tests plus additions.
+## Work package 0 — Stabilize the current uncommitted change sets (approval gate)
 
-## Phase 3: revision/content integrity
+**Goal:** a reviewable, committed baseline before remediation touches behavior.
 
-Affected files: `core/xml_correction.py`, `gui/article_drafts.py`, `gui/xml_correction_window.py`, `core/workflow_state.py`, selected MainWindow transitions, generator script handling and tests.
+1. Review and commit the existing Phase 2/3 XML changes as their own commit/PR.
+2. Review and commit the concurrent alternate-name/title-language changes separately.
+3. Confirm the full suite can be run with the documented headless command; record the three known hangs and two known failures as explicit xfails/skips **only if** work package 2 will fix them in the same release, otherwise leave them visible.
 
-- Extend existing generated/current/pending/archive records; do not replace their proven regeneration prompts. Bind last validation to an immutable revision/profile and retain export provenance.
-- Resolve A02 across activation, undo/redo, JSON workspace restore and non-UTF-8 declarations. Preserve immutable original source bytes separately from the mutable saved baseline.
-- Resolve A06 by preserving trustworthy alphabetic script annotations without reintroducing stale-offset formatting errors. Review scientific fixtures with explicit expected text/markup.
-- Validate workspace structure before changing live state; stage/commit restoration and retain recovery on failure (R02).
-- Exercise every PDF review → finish → correction → edit → validate → export → reopen → regenerate transition, including conflicts, cancellation, invalid raw edits and switching articles. Retain existing comment policy unless a change is approved.
+**Acceptance:** clean separation of change sets; `git status` shows only intentional files; the documented baseline command and its result are reproducible.
 
-Acceptance: no silent correction loss or encoding drift; no stale schema result applied to a changed revision; archived corrections recoverable; unsupported content remains intact.
+**Do not:** rewrite the Phase 2/3 XML code, change the ANI namespace, or alter schema/validation semantics while stabilizing.
 
-## Phase 4: test engineering and CI
+---
 
-- Preserve the current 38 modules. Add explicit unit/integration/GUI/schema/scientific/recovery/benchmark markers and controlled discovery; declare pytest and pytest-qt requirements.
-- Add a network-denial fixture with mocked services, CLI end-to-end regressions for A05, interrupted I/O and subprocess shutdown tests for R01/R04.
-- Create reviewed golden XML/PDF fixtures for multicolumn layouts, affiliation ambiguity, numeric/alphabetic scripts, symbols/formulas, hyphenation, multiple abstracts, namespaces, tables and atypical pages. Record fixture origin/rights and expected article scope.
-- Structural comparisons must preserve text, tails, order and semantic markup. Canonicalization must not erase A03-like failures. Review golden changes rather than auto-accepting regeneration.
-- Add GitHub Actions only after deciding supported Python/platform versions; begin with the verified dependency combination and Windows/offscreen Qt. A passing local suite does not prove hosted CI compatibility.
+## Work package 1 (P1) — Headless conversion contract and load lifecycle
 
-## Phase 5: small architecture changes
+**Findings:** C01, C02, C03, C04.
 
-- Repair A05 using an explicit conversion workflow/completion contract. Do not merely delete `wait=True`: async loading, article-start policy and dialog-free batch errors need handling.
-- Extract revision persistence and conversion/job coordination behind existing GUI methods. Keep Qt widgets out of new domain services. Move blocking selection classification (A07) to the shared job mechanism and add generation/cancellation handling.
-- Preserve shortcuts, signals, slots, explicit article eligibility, heuristic fallbacks and draft behavior. Run workflow regression tests after each extraction; no giant MainWindow rewrite.
+**Goal:** batch conversion never writes the wrong article, never blocks on a dialog, and never reports success with zero output.
 
-## Phase 6: measured performance
+**Design:** introduce a conversion-facing load/export result that is independent of `QMessageBox`.
 
-Deferred; no performance optimization approved or performed. Use a reviewed small/medium/large PDF corpus and fixed environment to measure PDF open, text extraction, rasterization, layout/paragraph reconstruction, classification, XML generation/validation, peak process memory and service latency separately. Record cold/warm runs and distribution, not a single test-suite duration. Inspect redundant PDF opens and raster allocations only after measurement. Never trade away content/markup for speed.
+- `LoadResult` (success, document, source path, generation, typed error) returned by `_load_pdf_path`/the worker completion path; `Converter` consumes it instead of inspecting `window.document`.
+- Transactional failure: on error, clear document, source path, viewer payload, article state, selection, and draft baseline for that load; reset generation.
+- Explicit export result from `run_auto_pipeline` (`written_paths`, `skipped_reason`); `Converter.convert` requires at least one written path.
+- Dialog policy injected into the window (`interactive`/`headless`) or moved to a GUI adapter that the conversion path does not import.
+- Seed the draft baseline on successful load, or replace JSON comparison with explicit dirty tracking reset on load/save/open, so a load with no edits is clean.
 
-## Phase 7: recovery and observability
+**Likely files:** `pdf_to_jats/gui/main_window.py` (`_load_pdf_path`, `_on_pdf_load_complete`, `run_auto_pipeline`, `closeEvent`), `pdf_to_jats/gui/article_drafts.py` (`_workspace_text`, `confirm_close_drafts`), `pdf_to_jats/cli.py` (`Converter.convert`, `main`). Prefer minimal extraction over a new architecture layer in this package.
 
-Establish typed PDF/extraction/classification/service/XML/filesystem/cancellation errors. Add bounded, redacted diagnostics, recoverable UI messages and shutdown ownership; test delayed completion, timeouts and partial failures with mocks. Address A08 without copying real secrets into reports or fixtures.
+**Tests (must fail before, pass after):**
 
-## Phase 8: dependencies and packaging
+- `test_failed_load_clears_previous_document` (C01).
+- `test_cli_corrupt_pdf_returns_nonzero_without_dialog` (C01/C03).
+- `test_close_after_load_does_not_prompt`, `test_second_pdf_does_not_prompt_without_edits` (C02).
+- `test_batch_two_pdfs_completes` (C02).
+- Existing `test_cli_converter_end_to_end`, `test_cli_main_exit_codes`, `test_load_pdf_path_wait_parameter_completes_extraction`, `test_article_finish_drops_stale_response_on_generation_mismatch` must pass in a normal, non-deselected run (C02/C04).
+- `test_cli_no_article_is_failure` (C04).
 
-Document Python support and startup/install instructions; separate runtime, optional Docling and test dependencies; select reproducible per-platform locking. Review JavaScript dependency ownership before any removal. Improve ignore rules and intentionally untrack generated dependencies/bytecode without deleting user work. Verify startup with spaces in paths, clean install/imports and headless tests. Run a current vulnerability review; `pip check` is not one.
+**Acceptance:** full suite terminates without deselection or dialog stubs; batch of two valid PDFs produces two XML files; corrupt PDF produces nonzero exit and no XML; closing after a mere load never prompts.
 
-## Deliverable status
+**Risk:** draft-save semantics are user-visible. Headless mode must define what happens to genuinely unsaved edits (default: fail the batch with a clear message; never silently discard without an explicit flag).
 
-- Produced: `00_baseline_report.md`, `01_code_audit.md`, this plan, `03_test_results.md`, and inventory/environment evidence.
-- `04_performance_report.md` awaits the approved measurement phase; no invented baseline numbers.
-- `05_final_engineering_review.md` awaits implementation and final verification; this audit is not a production-readiness certification.
-- No bugs fixed, production files changed, tests rewritten, CI added, or dependencies upgraded in Phases 0–1. Remaining technical debt is enumerated in the audit. Approve Phase 2 separately before implementation.
+---
+
+## Work package 2 (P2) — Test infrastructure and golden fidelity
+
+**Findings:** C06, C07, C12 (and prerequisite for C05 coverage).
+
+1. Fix `tests/test_golden_structural.py` to supply required `bbox`; decide the intended `PDFViewer` visibility API and either implement it deliberately or rewrite `tests/test_process_lifecycle.py` against the real render API. Do not add a no-op method to satisfy a test.
+2. Make the structural comparator exact by default; compare all XPath nodes including comments/PIs; add mutation tests that prove it rejects a changed space, tail, comment, and PI.
+3. Add `pytest-timeout` and a `gui` marker; add CI (headless Qt, Python matrix, timeout). Stop tracking `.pyc` and `node_modules`; add `pyproject.toml` test extras and a README with the documented command.
+
+**Acceptance:** `QT_QPA_PLATFORM=offscreen python -m pytest -q` terminates; a deliberately hanging test fails via timeout; comparator mutation tests pass; CI green on the stabilized baseline.
+
+---
+
+## Work package 3 (P2) — Shutdown/lifecycle safety
+
+**Finding:** C05.
+
+- Rework `PDFViewer.cleanup` so live threads/workers stay owned until `finished`, or use a bounded wait that is verified and logged on timeout.
+- Add a slow-render close test using a fake worker; assert no thread is destroyed while running.
+- Depends on work package 2 fixing the lifecycle test API.
+
+**Acceptance:** close during rasterization exits cleanly under the stress test; no `QThread: Destroyed while thread is still running` warning/crash.
+
+---
+
+## Work package 4 (P2) — GUI responsiveness, secrets, and error semantics
+
+**Findings:** C08, C09, C10.
+
+- Move `classify_selected_blocks` off the GUI thread using the existing worker pattern; disable the action while running; add a fake-client responsiveness test.
+- Prefer `OPENROUTER_API_KEY`; remove or gate the plaintext writer, restrict permissions, redact keys in logs; add a config/redaction test.
+- Introduce typed LLM errors; catch only expected transport/parse failures; log unexpected exceptions with stack traces; keep heuristic fallback only for explicit unavailability and label its provenance.
+- Add an error-injection test proving a programmer error is not silently converted into a heuristic result.
+
+**Acceptance:** no synchronous network call remains in a GUI-thread slot; no plaintext key write without explicit opt-in; unexpected errors are visible in logs/tests.
+
+---
+
+## Work package 5 (P2) — Schema readiness
+
+**Finding:** C11.
+
+- Obtain the authoritative Elsevier ANI/CAR schema with redistribution terms; pin it under `pdf_to_jats/schemas/` with provenance/checksum; add CI valid/invalid fixture tests.
+- If redistribution is not permitted, require an explicit local schema profile for validated export, document it, and keep `SCHEMA_UNAVAILABLE` truthful.
+
+**Acceptance:** CI proves `SCHEMA_VALID`/`SCHEMA_INVALID` against a pinned schema, or the product explicitly requires a user-supplied schema and never claims validity. **No report may claim schema validity without this.**
+
+---
+
+## Later phases (align with the master plan)
+
+- **Phase 4 — regression/integration tests:** corpus-driven extraction/layout tests (R01), malformed draft/revision tests (R03), recorded LLM/GROBID contract tests (R04). Use licensed or synthetic PDFs only.
+- **Phase 5 — architecture/reliability:** extract a conversion service from `MainWindow`; centralize dialogs, worker lifecycles, and error types. Do not rewrite working XML/GUI components.
+- **Phase 6 — performance:** benchmark before optimizing (R02). Measure cold/warm load, pages/min, peak RSS, and raster behavior; only then consider caching/shared raster services or the 3× matrix.
+- **Phase 7 — failure recovery:** disk-full, permission-denied, interrupted write, schema-missing, and crash-recovery tests; verify atomic publication and draft restore.
+- **Phase 8 — packaging/CI:** declared dependencies, lock/constraints, headless CI, artifact cleanup, and release checklist.
+
+---
+
+## Suggested first approved step
+
+**Work package 1 only**, plus the minimal test fixes needed to run it (the existing CLI tests and the two stale-API tests). That closes all four P1 blockers and turns the suite from “hangs/red” into a usable gate. Work packages 2–5 follow in separate approvals.
+
+## Constraints carried forward
+
+- No rebuild, no dependency replacement, no schema invented, no test weakened to pass.
+- Preserve: secure XML parsing, atomic writes, revision fingerprints, draft/validated separation, mixed-content and encoding handling, generation guards, network-denial test fixture.
+- Every fix must include the listed regression test; every claim must be executed, not inferred.

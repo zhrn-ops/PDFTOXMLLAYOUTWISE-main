@@ -16,6 +16,9 @@ except ModuleNotFoundError:
 
     LXML_AVAILABLE = False
 
+from pdf_to_jats.core.alternate_names import assigned_names
+from pdf_to_jats.core.country_codes import country_code
+from pdf_to_jats.core.title_order import english_titles_first
 from pdf_to_jats.core.atomic_io import atomic_write_bytes
 from pdf_to_jats.core.xml_validation import ExportMode, SchemaProfile, validate_xml
 from pdf_to_jats.models.document import Document
@@ -43,6 +46,7 @@ class JATSGenerator:
     def to_bytes(self, document: Document) -> bytes:
         """Build ANI XML in memory without creating an output file."""
         root = self._build_root(document)
+        english_titles_first(root)
         self._line_break_elements(root)
         if LXML_AVAILABLE:
             return etree.tostring(
@@ -245,6 +249,16 @@ class JATSGenerator:
                     etree.SubElement(author_el, self._qname("surname", self.CE_NS)).text = surname
                 if given_names:
                     etree.SubElement(author_el, self._qname("given-name", self.CE_NS)).text = given_names
+                seen_alt_names = {self._name_key(given_names), self._name_key(surname)}
+                for alternate in [*author.alternate_names, *assigned_names(author, document.authors, document.blocks)]:
+                    alt_text = self._sanitize_xml_text(" ".join(str(alternate.text or "").split()))
+                    # A native-script byline is exported as ce:alt-name beside the
+                    # English name ("Aliasghar" + "علی اصغر پیشداد"), not as a
+                    # second author.
+                    if not alt_text or self._name_key(alt_text) in seen_alt_names:
+                        continue
+                    seen_alt_names.add(self._name_key(alt_text))
+                    etree.SubElement(author_el, self._qname("alt-name", self.CE_NS)).text = alt_text
             if affiliation is not None:
                 affiliation_el = etree.SubElement(author_group, self._qname("affiliation"))
                 self._append_affiliation(affiliation_el, affiliation)
@@ -392,9 +406,10 @@ class JATSGenerator:
                 if not value:
                     continue
                 node = etree.SubElement(parent, self._qname(tag))
-                node.text = self._sanitize_xml_text(value)
                 if tag == 'country':
                     node.set('iso-code', self._country_iso_code(value))
+                else:
+                    node.text = self._sanitize_xml_text(value)
         etree.SubElement(parent, self._qname('source-text', self.CE_NS)).text = self._sanitize_xml_text(affiliation.text)
 
     def _append_affiliation_text(self, parent: Any, text: str) -> None:
@@ -445,6 +460,10 @@ class JATSGenerator:
         return initials, " ".join(given), " ".join(parts[surname_start:])
 
     @staticmethod
+    def _name_key(value: str) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    @staticmethod
     def _name_token_is_initials(value: str) -> bool:
         """Return true when a purported given name is only initials."""
 
@@ -469,16 +488,9 @@ class JATSGenerator:
             )
             if repeated_country:
                 parts[-1] = repeated_country.group("country")
-        country_names = {
-            "south korea", "republic of korea", "korea", "japan", "china",
-            "india", "singapore", "canada", "australia", "germany", "france",
-            "italy", "spain", "netherlands", "taiwan", "united states", "united states of america",
-            "usa", "uk", "united kingdom",
-        }
-        country_index = next(
-            (index for index in range(len(parts) - 1, -1, -1) if parts[index].casefold() in country_names),
-            None,
-        )
+        # Only a complete trailing address component is a country candidate.
+        # Never interpret short codes in the middle of an institution/address.
+        country_index = (len(parts) - 1 if len(parts) > 1 and country_code(parts[-1]) else None)
         country = parts[country_index] if country_index is not None else ""
         location_end = country_index if country_index is not None else len(parts)
         city = parts[location_end - 1] if location_end > 1 else ""
@@ -487,30 +499,10 @@ class JATSGenerator:
         return organization, city, country
 
     def _country_iso_code(self, country: str) -> str:
-        country_codes = {
-            "colombia": "COL",
-            "japan": "JPN",
-            "united states": "USA",
-            "united states of america": "USA",
-            "uk": "GBR",
-            "united kingdom": "GBR",
-            "south korea": "KOR",
-            "republic of korea": "KOR",
-            "korea": "KOR",
-            "usa": "USA",
-            "china": "CHN",
-            "india": "IND",
-            "singapore": "SGP",
-            "canada": "CAN",
-            "australia": "AUS",
-            "germany": "DEU",
-            "france": "FRA",
-            "italy": "ITA",
-            "spain": "ESP",
-            "netherlands": "NLD",
-            "taiwan": "TWN",
-        }
-        return country_codes.get(country.casefold(), "UNK")
+        code = country_code(country)
+        if not code:
+            raise ValueError(f'Country {country!r} needs review: select a valid three-letter country code.')
+        return code
 
     @staticmethod
     def _repair_mojibake(value: str) -> str:

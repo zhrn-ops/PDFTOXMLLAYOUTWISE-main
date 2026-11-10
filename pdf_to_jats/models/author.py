@@ -7,13 +7,14 @@ from dataclasses import dataclass, field
 
 @dataclass(slots=True)
 class AuthorName:
-    """One printed form of an author's name, usually a native-script variant."""
+    """One printed form of an author's name, usually a native-script variant.
+
+    The name is kept whole; alternate-language names are not split into
+    given-name/surname parts.
+    """
 
     text: str
     language: str = ""
-    given_names: str = ""
-    surname: str = ""
-    initials: str = ""
 
 
 @dataclass(slots=True)

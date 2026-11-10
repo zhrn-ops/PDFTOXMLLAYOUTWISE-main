@@ -155,11 +155,27 @@ class ArticleDrafts:
             workflow.get('state', {}).pop('_current_segment_key', None)
         return data
 
-    def confirm_close_drafts(self, action='closing'):
+    def workspace_is_clean(self):
+        """Whether there is no unsaved draft/workflow state to prompt about."""
         if not self.session and getattr(self.window(), 'document', None) is None:
             return True
-        if self._workspace_content(self._workspace_text()) == self._workspace_content(self._saved_workspace):
+        # A programmatically supplied document has no saved baseline. There is
+        # no article draft to save in that state, so closing must not block.
+        if self._saved_workspace is None:
+            return not self._drafts and self.session is None
+        return self._workspace_content(self._workspace_text()) == self._workspace_content(self._saved_workspace)
+
+    def mark_workspace_clean(self):
+        """Record the just-loaded workspace as the baseline for future prompts."""
+        self._saved_workspace = self._workspace_text()
+
+    def confirm_close_drafts(self, action='closing'):
+        if self.workspace_is_clean():
             return True
+        if getattr(self.window(), 'headless', False):
+            # Headless callers must never create a modal dialog. Refuse the
+            # replacement instead; the caller can report the unsaved state.
+            return False
         answer = QMessageBox.question(self, 'Save article drafts?',
             f'Save your article drafts before {action}? Exported XML files are already on disk.',
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)

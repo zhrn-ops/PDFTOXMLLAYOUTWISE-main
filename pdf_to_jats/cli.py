@@ -55,7 +55,7 @@ class Converter:
 
     def __init__(self, output_dir: Path | None = None) -> None:
         self.app = QApplication.instance() or QApplication([])
-        self.window = MainWindow()
+        self.window = MainWindow(headless=True)
         self.output_root = (output_dir or self.window.config.generated_xml_dir).resolve()
 
     def convert(self, pdf_path: Path, isolate: bool) -> list[Path]:
@@ -71,20 +71,23 @@ class Converter:
         target.mkdir(parents=True, exist_ok=True)
         self.window.config.generated_xml_dir = target
 
-        def snapshot() -> dict[Path, int]:
-            return {
-                path.resolve(): path.stat().st_mtime_ns
-                for path in target.glob("*.xml")
-            }
-
-        before = snapshot()
-        self.window._load_pdf_path(str(pdf_path), wait=True)
+        load_error = self.window._load_pdf_path(str(pdf_path), wait=True)
+        if load_error:
+            raise RuntimeError(load_error)
         if self.window.document is None:
             raise RuntimeError(f"Extraction produced no document for {pdf_path}")
-        self.window.run_auto_pipeline()
+        written = self.window.run_auto_pipeline()
         self.app.processEvents()
-        after = snapshot()
-        return sorted(path for path, mtime in after.items() if before.get(path) != mtime)
+        written = [path for path in written if path.is_file()]
+        if not written:
+            raise RuntimeError(
+                f"No XML was produced for {pdf_path}; start an article or check the "
+                "pipeline log for a skipped export reason."
+            )
+        # The exported XML is already on disk. Re-baseline the workspace so the
+        # next batch file is not refused for a draft that no longer exists.
+        self.window._xml_correction_window.mark_workspace_clean()
+        return written
 
     def review_ids(self) -> list[str]:
         return list(self.window._review_block_ids)

@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 )
 
 from pdf_to_jats.core.author_linker import AuthorLinker, LinkedAuthors
+from pdf_to_jats.core.alternate_names import is_alternate_capture, is_native_name_block, apply_assignments
 from pdf_to_jats.core.auto_refiner import AutoRefiner, abstract_number_marker, is_abstract_heading
 from pdf_to_jats.core.jats_generator import JATSGenerator
 from pdf_to_jats.core.inline_script_detector import (
@@ -262,8 +263,10 @@ class MainWindow(QMainWindow):
             self.viewer.cleanup()
         super().closeEvent(event)
 
-    def __init__(self) -> None:
+    def __init__(self, headless: bool = False) -> None:
         super().__init__()
+        self.headless = headless
+        self._last_load_error: str | None = None
         self.config = load_config()
         self.extractor = PDFExtractor(
             visible_text_only=self.config.visible_text_only,
@@ -637,6 +640,9 @@ class MainWindow(QMainWindow):
         self.review_parser.setToolTip('Choose author/affiliation parsing. Each path retains a separate XML draft.')
         parser_row.addWidget(self.review_parser, 1)
         articles_layout.addLayout(parser_row)
+        self.alternate_names_btn = QPushButton("Assign alternate names")
+        self.alternate_names_btn.clicked.connect(self.assign_alternate_names)
+        articles_layout.addWidget(self.alternate_names_btn)
         article_actions = QGridLayout()
         for index, button in enumerate((self.finish_article_btn, self.reopen_article_btn,
                                         self.split_segment_btn, self.merge_previous_btn,
@@ -1214,18 +1220,23 @@ class MainWindow(QMainWindow):
         return [ValidationError(issue.message)
                 for issue in result.syntax_issues + result.semantic_issues]
 
-    def run_auto_pipeline(self) -> None:
+    def run_auto_pipeline(self) -> list[Path]:
         """One-click pipeline: current PDF through refine + export with no dialogs."""
 
         if self.document is None:
-            QMessageBox.information(self, "No document", "Load a PDF first.")
-            return
+            if not self.headless:
+                QMessageBox.information(self, "No document", "Load a PDF first.")
+            return []
         if not self._article_starts():
-            self._log(
-                "No article started yet: enter an article/abstract number in Article "
-                "Metadata and select Start Article With This Number before running the pipeline."
-            )
-            return
+            if self._document_segments():
+                self._log(
+                    "No article started yet: enter an article/abstract number in Article "
+                    "Metadata and select Start Article With This Number before running the pipeline."
+                )
+                return []
+            # An unsegmented PDF is a single article. Headless conversion must
+            # not require a manual article-number step just to write its XML.
+            self._log("No article was started; exporting the whole unsegmented PDF.")
         self._update_document_model()
         self._log_link_issues()
         export_document = self._document_with_html_preview_continuations()
@@ -1255,12 +1266,14 @@ class MainWindow(QMainWindow):
             else:
                 self._log(f"Draft XML written to {generated_path}; publisher validation is incomplete")
         self.current_xml_path = output_paths[0] if output_paths else None
-        self._show_generated_xml(output_paths)
+        if not self.headless:
+            self._show_generated_xml(output_paths)
         review_count = len(self._review_block_ids)
         if review_count:
             self._log(f"Auto pipeline complete: {review_count} block(s) flagged for review.")
         else:
             self._log("Auto pipeline complete.")
+        return output_paths
 
     def _has_html_preview_continuation(self, block_ids: set[str]) -> bool:
         return any(set(group) == block_ids for group in self._html_preview_merges)
@@ -2231,7 +2244,7 @@ class MainWindow(QMainWindow):
                     dialog.setRange(0, 1)
                     dialog.setValue(1)
                     dialog.setCancelButtonText("Close")
-        for name in ("finish_article_btn", "classify_btn", "review_parser"):
+        for name in ("finish_article_btn", "classify_btn", "review_parser", "alternate_names_btn"):
             button = getattr(self, name, None)
             if button is not None:
                 button.setEnabled(not busy)
@@ -2344,6 +2357,7 @@ class MainWindow(QMainWindow):
                     segment_document.metadata["link_issues"] = []
                     segment_document.metadata["author_link_source"] = "manual_review"
             if parser == 'grobid' and isinstance(response, LinkedAuthors):
+                apply_assignments(response.authors, segment_document.blocks)
                 segment_document.authors = response.authors
                 segment_document.affiliations = response.affiliations
                 segment_document.corresponding_author = response.corresponding_author
@@ -3043,6 +3057,42 @@ class MainWindow(QMainWindow):
         self._refresh_articles_list()
         self._refresh_startup_ui()
 
+    def assign_alternate_names(self) -> None:
+        """Review native captures belonging only to the working article."""
+        from pdf_to_jats.gui.alternate_names_dialog import AlternateNamesDialog
+
+        if self.document is None:
+            QMessageBox.information(self, 'No document', 'Load a PDF first.')
+            return
+        current = self._current_segment()
+        if current is None and self._document_segments():
+            QMessageBox.information(self, 'Select article', 'Select the article whose names you want to assign.')
+            return
+        blocks = self._segment_blocks(current[0]) if current else self.document.blocks
+        candidates = [block for block in blocks if is_native_name_block(block)]
+        if not candidates:
+            QMessageBox.information(self, 'No alternate names',
+                                    'Capture each non-English name using the Author role first.')
+            return
+        locked = self._locked_selection_blocks(candidates)
+        if locked:
+            self._warn_locked_blocks(locked)
+            return
+        # Use the same source-based author names that will resolve on reload.
+        linked = self.linker.link_from_blocks(
+            [block for block in blocks if block.role in {'author', 'author_affiliation', 'corresponding_author'}],
+            [block for block in blocks if block.role == 'affiliation'],
+        )
+        dialog = AlternateNamesDialog(candidates, linked.authors, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        dialog.apply()
+        if current:
+            self._llm_links_by_segment.pop(current[1], None)
+            self._manual_link_review_segments.discard(current[1])
+        self._refresh_after_article_change()
+        self._log('Saved alternate-name assignments for the current article.')
+
     def _link_review_scope(self) -> tuple[list, list, list]:
         """Authors, affiliations, and issues belonging to the working article."""
 
@@ -3262,6 +3312,9 @@ class MainWindow(QMainWindow):
                 for affiliation_id in mapped_ids:
                     if affiliation_id not in existing.affiliation_ids:
                         existing.affiliation_ids.append(affiliation_id)
+                for alternate in candidate.alternate_names:
+                    if alternate not in existing.alternate_names:
+                        existing.alternate_names.append(alternate)
                 if candidate.degrees and not existing.degrees:
                     existing.degrees = candidate.degrees
                 elif candidate.degrees:
@@ -3294,6 +3347,7 @@ class MainWindow(QMainWindow):
         author_blocks = [
             block for block in segment_document.blocks
             if block.role in {"author", "corresponding_author", "author_affiliation"}
+            and not is_alternate_capture(block)
         ]
         affiliation_blocks = [
             block for block in segment_document.blocks if block.role == "affiliation"
@@ -6846,9 +6900,16 @@ class MainWindow(QMainWindow):
         self.metadata_panel.set_merge_details(None)
         self.props.set_role(None)
 
-    def _load_pdf_path(self, path: str, wait: bool = False) -> None:
+    def _load_pdf_path(self, path: str, wait: bool = False) -> str | None:
+        """Load a PDF, returning an error for synchronous loads.
+
+        The return value is used by headless callers. Asynchronous GUI loads
+        return ``None`` because completion arrives later via the worker signal.
+        """
+
+        self._last_load_error = None
         if self.document is not None and not self._xml_correction_window.confirm_close_drafts('opening another PDF'):
-            return
+            return "Load cancelled: unsaved article drafts were not discarded."
         self._xml_correction_window._retain_draft()
         self._document_generation += 1
         generation = self._document_generation
@@ -6860,7 +6921,7 @@ class MainWindow(QMainWindow):
             worker.finished.connect(self._on_pdf_load_complete, Qt.DirectConnection)
             worker.run()
             worker.deleteLater()
-            return
+            return self._last_load_error
 
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -6873,6 +6934,7 @@ class MainWindow(QMainWindow):
         self._pdf_load_thread = thread
         self._pdf_load_worker = worker
         thread.start()
+        return None
 
     @Slot(int, object, object)
     def _on_pdf_load_complete(self, generation: int, result, error) -> None:
@@ -6880,7 +6942,9 @@ class MainWindow(QMainWindow):
             return
         if error is not None:
             self._log(f"Could not load PDF: {error}")
-            QMessageBox.critical(self, "PDF Load Error", str(error))
+            self._clear_document_after_load_failure(str(error))
+            if not self.headless:
+                QMessageBox.critical(self, "PDF Load Error", str(error))
             return
         (
             self.document, refine_report, page_count, page_sizes, preview,
@@ -6936,7 +7000,51 @@ class MainWindow(QMainWindow):
         self._last_pipeline_report_json = report_json
         self.metadata_panel.set_merge_details(None)
         self.props.set_role(None)
+        self._xml_correction_window.mark_workspace_clean()
         QTimer.singleShot(100, self._finish_pdf_load_ui)
+
+    def _clear_document_after_load_failure(self, error: str) -> None:
+        """Make a failed load transactional so no previous article stays active."""
+
+        self._last_load_error = error
+        self.document = None
+        self.current_xml_path = None
+        self._generated_xml_paths = []
+        self._last_refine_report = None
+        self._last_pipeline_report_json = None
+        self._review_block_ids = []
+        self._review_index = -1
+        self._article_draft_keys = {}
+        self._finished_segment_keys = []
+        self._deleted_segment_keys = []
+        self._current_segment_key = None
+        self._llm_links_by_segment = {}
+        self._manual_link_review_segments = set()
+        self._manual_document_author_links = {}
+        self._selected_block_ids.clear()
+        self._selected_zone_ids.clear()
+        self._selected_zone_id = None
+        self._undo_stack.clear()
+        self._active_block_move_undo_id = None
+        self._active_zone_move_undo_id = None
+        self._html_preview_merges.clear()
+        self._invalidate_segment_identity()
+        self.viewer.cleanup()
+        self.viewer.set_deleted_block_ids(set())
+        self.viewer.set_document_overlays([], [])
+        self.document_stack.setCurrentIndex(0)
+        self.edit_toolbar.hide()
+        self.pdf_filename_label.setText("Open a PDF to start building your article XML")
+        self.pdf_filename_label.setToolTip("")
+        self.tree.clear()
+        self.metadata_panel.set_merge_details(None)
+        self.props.set_role(None)
+        # Do not leave the previous document's correction workspace visible.
+        self.pages.setCurrentWidget(self.converter_page)
+        self.correct_step_btn.setChecked(False)
+        self.convert_step_btn.setChecked(True)
+        self._refresh_startup_ui()
+        self._refresh_article_buttons()
 
     @Slot()
     def _finish_pdf_load_ui(self) -> None:
@@ -6958,6 +7066,7 @@ class MainWindow(QMainWindow):
         self.viewer.set_zones([asdict(zone) for zone in self.document.zones])
         self._update_html_preview()
         self._refresh_article_buttons()
+        self._xml_correction_window.mark_workspace_clean()
         # Keep the converter visible after extraction. Finishing an article
         # prepares its XML draft in memory and opens the correction workspace.
 

@@ -9,11 +9,14 @@ Covers:
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
 import pytest
 from PySide6.QtCore import QEvent, QThread
 from PySide6.QtGui import QCloseEvent
 import fitz
 
+import pdf_to_jats.gui.pdf_viewer as pdf_viewer_module
 from pdf_to_jats.gui.main_window import MainWindow
 from pdf_to_jats.gui.pdf_viewer import PDFViewer
 from pdf_to_jats.models.document import Document
@@ -57,18 +60,64 @@ def test_close_event_blocked_when_pdf_loading(qapp, sample_pdf: Path):
 
 
 @pytest.mark.recovery
-def test_viewer_cleanup_cancels_in_flight_raster_threads(qapp, sample_pdf: Path):
-    """R01: PDFViewer.cleanup cancels and waits for raster workers before destruction."""
+def test_viewer_cleanup_cancels_in_flight_raster_threads(qapp, sample_pdf: Path, monkeypatch):
+    """R01: cleanup waits for a raster worker that is still inside rendering."""
+    started = threading.Event()
+    release = threading.Event()
+    real_open = fitz.open
+
+    class BlockingPage:
+        def __init__(self, page):
+            self._page = page
+
+        def get_pixmap(self, *args, **kwargs):
+            started.set()
+            release.wait(10)
+            return self._page.get_pixmap(*args, **kwargs)
+
+    class BlockingDocument:
+        def __init__(self, path):
+            self._doc = real_open(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self._doc.close()
+
+        def load_page(self, index):
+            return BlockingPage(self._doc.load_page(index))
+
+    monkeypatch.setattr(
+        pdf_viewer_module.fitz, "open", lambda path: BlockingDocument(path)
+    )
     viewer = PDFViewer()
+    timer = None
     try:
         viewer.load_pdf(str(sample_pdf), page_count=3, page_sizes=[(500, 700)] * 3)
-        # Request page renders
-        viewer.set_visible_range(0, 2)
-        # Call cleanup while threads might be active
+        deadline = time.monotonic() + 5
+        while not started.is_set() and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        assert started.is_set(), "raster worker never entered rendering"
+        threads = list(viewer._page_render_threads)
+        assert threads, "no raster thread was recorded"
+
+        # Release the worker while cleanup is waiting, without relying on the
+        # Qt event loop (which cleanup intentionally blocks).
+        timer = threading.Timer(0.25, release.set)
+        timer.start()
         viewer.cleanup()
+
         assert len(viewer._page_render_threads) == 0
         assert len(viewer._page_render_workers) == 0
+        # This is the regression check: clearing the lists is not enough; the
+        # worker thread must have actually stopped before cleanup returns.
+        assert all(not thread.isRunning() for thread in threads)
     finally:
+        release.set()
+        if timer is not None:
+            timer.cancel()
         viewer.deleteLater()
 
 

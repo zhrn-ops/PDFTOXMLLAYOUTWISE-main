@@ -85,6 +85,7 @@ def test_author_form_lists_attributes_and_every_person_field(tmp_path):
         'given-name': 'Alice',
         'suffix': '',
         'e-address': '',
+        'alt-name': '',
     }
 
 
@@ -106,6 +107,62 @@ def test_author_form_fills_empty_person_fields_and_attributes(tmp_path):
     assert [child.text for child in author] == [
         'A.', 'PhD', 'Smith', 'Alice', 'Jr', 'alice@example.com',
     ]
+
+
+def test_author_form_edits_the_alternate_language_name(tmp_path):
+    session = XmlDocumentSession.from_text(ANI_AUTHOR, tmp_path / 'draft.xml')
+    values = session.author_form(0)
+    values['alt-name'] = 'علی اصغر پیشداد'
+
+    assert session.set_author_form(0, values) is True
+    author = etree.fromstring(session.xml_text().encode()).find(
+        './/{http://www.elsevier.com/xml/ani/ani}author')
+    alt = author.find('{http://www.elsevier.com/xml/ani/common}alt-name')
+    assert alt.text == 'علی اصغر پیشداد'
+    assert [etree.QName(child).localname for child in author][-1] == 'alt-name'
+
+
+def test_author_form_reads_and_writes_alternate_name_as_one_whole_name(tmp_path):
+    session = XmlDocumentSession.from_text(
+        '<units xmlns="http://www.elsevier.com/xml/ani/ani" '
+        'xmlns:ce="http://www.elsevier.com/xml/ani/common"><author-group>'
+        '<author><ce:surname>Mousavi</ce:surname>'
+        '<ce:given-name>Somayeh</ce:given-name>'
+        '<ce:alt-name><ce:given-name>سولماز</ce:given-name>'
+        '<ce:surname>موسوی</ce:surname></ce:alt-name>'
+        '</author></author-group></units>',
+        tmp_path / 'draft.xml',
+    )
+    assert session.author_form(0)['alt-name'] == 'سولماز موسوی'
+    assert session.author_alt_names(session.authors()[0]) == ['سولماز موسوی']
+
+    values = session.author_form(0)
+    values['alt-name'] = 'س. موسوی'
+    assert session.set_author_form(0, values) is True
+    alt = etree.fromstring(session.xml_text().encode()).find(
+        './/{http://www.elsevier.com/xml/ani/ani}author').find(
+        '{http://www.elsevier.com/xml/ani/common}alt-name')
+    assert alt.text == 'س. موسوی'
+    assert len(alt) == 0
+
+
+def test_author_list_row_shows_captured_alternate_name(qapp):
+    window = XmlCorrectionWindow()
+    window.session = XmlDocumentSession.from_text(
+        '<units xmlns="http://www.elsevier.com/xml/ani/ani" '
+        'xmlns:ce="http://www.elsevier.com/xml/ani/common"><author-group>'
+        '<author><ce:surname>Pishdad</ce:surname>'
+        '<ce:given-name>Aliasghar</ce:given-name>'
+        '<ce:alt-name>علی اصغر پیشداد</ce:alt-name>'
+        '</author></author-group></units>',
+        Path('draft.xml'),
+    )
+    window._refresh()
+    try:
+        assert window.author_list.item(1).text().strip() == (
+            'Pishdad Aliasghar  —  علی اصغر پیشداد')
+    finally:
+        window.deleteLater()
 
 
 def test_author_form_creates_missing_fields_in_schema_order(tmp_path):

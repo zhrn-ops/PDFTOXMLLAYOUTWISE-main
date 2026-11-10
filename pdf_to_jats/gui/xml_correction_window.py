@@ -951,16 +951,20 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 # Blank ANI authors are common in drafts; keep them selectable
                 # so their empty fields can be filled from the editor.
                 name = s.author_name(authors[index]) or f"Unnamed author {index + 1}"
-                item = QListWidgetItem("    " + name)
+                alt_names = s.author_alt_names(authors[index])
+                # Show the captured other-language name beside the English one
+                # so a reviewer can see that both forms survived conversion.
+                row_text = name + (f"  —  {' · '.join(alt_names)}" if alt_names else "")
+                item = QListWidgetItem("    " + row_text)
                 item.setData(Qt.UserRole, index)
                 self.author_list.addItem(item)
                 row_widget = QWidget(self.author_list.viewport())
                 row_layout = QHBoxLayout(row_widget)
                 row_layout.setContentsMargins(18, 6, 12, 6)
                 row_layout.setSpacing(10)
-                name_label = QLabel(name)
+                name_label = QLabel(row_text)
                 name_label.setMinimumWidth(0)
-                name_label.setToolTip(name)
+                name_label.setToolTip(row_text)
                 name_label.setTextFormat(Qt.PlainText)
                 name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
                 row_layout.addWidget(name_label, 1)
@@ -1015,7 +1019,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         labels = {'initials': 'Initials', 'given-name': 'Given names',
                   'given-names': 'Given names', 'surname': 'Surname',
                   'string-name': 'Full name', 'degrees': 'Degrees',
-                  'email': 'Email', 'phone': 'Phone', 'fax': 'Fax'}
+                  'email': 'Email', 'phone': 'Phone', 'fax': 'Fax',
+                  'alt-name': 'Alternate name (other language)'}
         for field, value in details:
             item = QListWidgetItem(
                 f"{labels.get(field, field.replace('-', ' ').title())}: {value}")
@@ -1473,7 +1478,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                   '@orcid': 'ORCID', 'initials': 'Initials', 'degrees': 'Degrees',
                   'surname': 'Surname', 'given-name': 'Given names',
                   'given-names': 'Given names', 'string-name': 'Full name',
-                  'suffix': 'Suffix', 'e-address': 'Email'}
+                  'suffix': 'Suffix', 'e-address': 'Email',
+                  'alt-name': 'Alternate name (other language)'}
         fields: dict[str, QLineEdit] = {}
         for key, value in values.items():
             name = key[1:] if key.startswith('@') else key
@@ -1513,7 +1519,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                   'surname': 'Surname', 'given-name': 'Given names',
                   'given-names': 'Given names', 'string-name': 'Full name',
                   'suffix': 'Suffix', 'e-address': 'Email',
-                  'email': 'Email', 'phone': 'Phone', 'fax': 'Fax'}
+                  'email': 'Email', 'phone': 'Phone', 'fax': 'Fax',
+                  'alt-name': 'Alternate name (other language)'}
         fields: dict[str, QLineEdit] = {}
         for key, value in values.items():
             label = labels.get(key, key.replace('-', ' ').title())
