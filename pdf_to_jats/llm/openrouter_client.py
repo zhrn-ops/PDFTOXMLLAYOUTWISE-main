@@ -11,7 +11,10 @@ import urllib.error
 import urllib.request
 
 
-class OpenRouterRateLimitError(RuntimeError):
+from pdf_to_jats.llm.errors import LLMUnavailable, LLMRateLimited, LLMResponseError, provider_errors
+
+
+class OpenRouterRateLimitError(LLMRateLimited):
     """Raised when OpenRouter or an upstream provider keeps rate-limiting."""
 
 
@@ -38,13 +41,14 @@ class OpenRouterClient:
             )
         if not self.api_key:
             self._available = False
-            self._missing_dependency_error = RuntimeError(
+            self._missing_dependency_error = LLMUnavailable(
                 "OpenRouter support requires OPENROUTER_API_KEY to be set."
             )
 
+    @provider_errors
     def classify(self, prompt: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self._available:
-            raise self._missing_dependency_error or RuntimeError("OpenRouter client is unavailable.")
+            raise self._missing_dependency_error or LLMUnavailable("OpenRouter client is unavailable.")
 
         errors: list[str] = []
         for model in self._models_to_try():
@@ -55,7 +59,7 @@ class OpenRouterClient:
                 continue
         if errors:
             raise OpenRouterRateLimitError("OpenRouter rate limit persisted: " + " | ".join(errors))
-        raise RuntimeError("OpenRouter request failed before receiving a response.")
+        raise LLMUnavailable("OpenRouter request failed before receiving a response.")
 
     def _models_to_try(self) -> tuple[str, ...]:
         models = [self.model]
@@ -87,28 +91,39 @@ class OpenRouterClient:
                     raw = json.loads(response.read().decode("utf-8"))
                     break
             except urllib.error.HTTPError as exc:
-                detail = exc.read().decode("utf-8", errors="replace")
                 if exc.code == 429:
                     if attempt < self.max_retries:
                         time.sleep(self._retry_delay(exc, attempt))
                         continue
                     raise OpenRouterRateLimitError(
-                        f"{model} returned 429 Too Many Requests: {self._extract_error_message(detail)}"
+                        f"{model} returned 429 Too Many Requests."
                     ) from exc
                 if exc.code in {500, 502, 503, 504} and attempt < self.max_retries:
                     time.sleep(self._retry_delay(exc, attempt))
                     continue
-                raise RuntimeError(
-                    f"OpenRouter request failed for {model}: {exc.code} {exc.reason}: {detail}"
+                raise LLMUnavailable(
+                    f"OpenRouter request failed with HTTP {exc.code}."
                 ) from exc
 
+        if not isinstance(raw, dict):
+            raise LLMResponseError("OpenRouter response must be a JSON object.")
         text = raw.get("output_text") or ""
+        if not isinstance(text, str):
+            raise LLMResponseError("OpenRouter output text must be a string.")
         if not text:
             output = raw.get("output") or []
+            if not isinstance(output, list):
+                raise LLMResponseError("OpenRouter output must be a list.")
             for item in output:
+                if not isinstance(item, dict) or not isinstance(item.get("content", []), list):
+                    raise LLMResponseError("OpenRouter output has invalid content.")
                 for content in item.get("content", []):
+                    if not isinstance(content, dict):
+                        raise LLMResponseError("OpenRouter content must be an object.")
                     if content.get("type") in {"output_text", "text"}:
                         text = content.get("text", "")
+                        if not isinstance(text, str):
+                            raise LLMResponseError("OpenRouter content text must be a string.")
                         if text:
                             break
                 if text:

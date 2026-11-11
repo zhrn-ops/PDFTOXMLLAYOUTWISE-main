@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC KNOWN ANI SUBSET. No publisher-schema validity claim. -->
+<units xmlns="http://www.elsevier.com/xml/ani/ani" xmlns:ce="http://www.elsevier.com/xml/ani/common">
+  <unit><head>
+    <citation-title><titletext xml:lang="ENG" original="y">Transport of H<ce:inf>2</ce:inf>O</titletext></citation-title>
+    <author-group seq="1"><author seq="1"><ce:given-name>Ada</ce:given-name><ce:surname>Example</ce:surname></author><affiliation><ce:source-text>Synthetic Institute A</ce:source-text></affiliation></author-group>
+    <abstracts><abstract><ce:para>Flux equals μ × 2.</ce:para></abstract></abstracts>
+  </head><body><ce:para>Measure x<ce:sup>2</ce:sup> at 20 °C.</ce:para></body></unit>
+</units>

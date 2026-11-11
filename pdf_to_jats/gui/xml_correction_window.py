@@ -19,16 +19,43 @@ from pdf_to_jats.core.xml_correction import XmlDocumentSession, normalize_organi
 from pdf_to_jats.core.draft_workspace import canonical_history
 from pdf_to_jats.core.xml_validation import ExportMode, SchemaProfile, ValidationStatus
 from pdf_to_jats.core.inline_script_detector import preserve_matching_runs
+from pdf_to_jats.core.language_codes import LANGUAGES, UNDETERMINED
 from pdf_to_jats.gui.pdf_viewer import PDFViewer
 from pdf_to_jats.gui.xml_code_editor import XmlCodeEditor
 from pdf_to_jats.gui.article_drafts import ArticleDrafts
 from pdf_to_jats.gui.styles import themed_style
 
 SCRIPT_COLORS = {"sup": "#78AAFF", "sub": "#FBBF24"}
-TITLE_LANGUAGES = (
-    "ENG", "FAS", "ARA", "FRA", "DEU", "SPA", "ITA", "POR", "RUS",
-    "TUR", "ZHO", "JPN", "KOR", "UND",
-)
+# Appendix A codes, so every language the table accepts can be picked here.
+LANGUAGE_CHOICES = tuple(sorted(row["alpha3"] for row in LANGUAGES)) + (UNDETERMINED,)
+LANGUAGE_LABELS = {row["alpha3"]: f"{row['alpha3']} — {row['name']}" for row in LANGUAGES}
+LANGUAGE_LABELS[UNDETERMINED] = f"{UNDETERMINED} — Undetermined"
+
+
+def add_language_choices(combo: QComboBox) -> None:
+    """List every appendix code with its language name, storing the code as item data."""
+    for code in LANGUAGE_CHOICES:
+        combo.addItem(LANGUAGE_LABELS.get(code, code), code)
+
+
+def selected_language(combo: QComboBox) -> str:
+    """Read the code from a language picker, including freely typed input."""
+    index = combo.currentIndex()
+    if index >= 0 and combo.currentText() == combo.itemText(index) and combo.itemData(index):
+        return str(combo.itemData(index)).strip().upper()
+    return combo.currentText().split("—")[0].strip().upper()
+
+
+def select_language(combo: QComboBox, code: str) -> None:
+    """Show an existing code even when the XML holds a value outside the appendix."""
+    wanted = str(code or "").strip().upper()
+    index = combo.findData(wanted) if wanted else -1
+    if index >= 0:
+        combo.setCurrentIndex(index)
+    else:
+        combo.setCurrentText(str(code or ""))
+
+
 SCRIPT_BACKGROUNDS = {
     'dark': {'sup': '#183653', 'sub': '#513a10'},
     'light': {'sup': '#cfe4ff', 'sub': '#ffe39a'},
@@ -177,8 +204,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         title_heading.addWidget(QLabel("Language (xml:lang)"))
         self.title_language = QComboBox()
         self.title_language.setEditable(True)
-        self.title_language.addItems(TITLE_LANGUAGES)
-        self.title_language.setMaximumWidth(110)
+        add_language_choices(self.title_language)
+        self.title_language.setMaximumWidth(190)
         self.title_language.setToolTip(
             "Language code for the primary title, e.g. ENG or FAS. "
             "Use the same code as the title's printed language."
@@ -877,7 +904,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         s = self.session
         self.title_edit.setPlainText(s.title())
         self.title_language.blockSignals(True)
-        self.title_language.setCurrentText(s.title_language())
+        select_language(self.title_language, s.title_language())
         self.title_language.blockSignals(False)
         self._fill_other_titles()
         if not preserve_abstract:
@@ -1162,7 +1189,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
 
         if self._syncing or not self.session:
             return
-        language = self.title_language.currentText().strip().upper()
+        language = selected_language(self.title_language)
         if language == self.session.title_language():
             return
         try:
@@ -1220,8 +1247,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         layout = QVBoxLayout(dialog)
         language = QComboBox()
         language.setEditable(True)
-        language.addItems(TITLE_LANGUAGES)
-        language.setCurrentText(str(entry.get("language") or "UND"))
+        add_language_choices(language)
+        select_language(language, str(entry.get("language") or UNDETERMINED))
         form = QFormLayout()
         form.addRow("Language (xml:lang)", language)
         layout.addLayout(form)
@@ -1237,7 +1264,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         editor.setFocus()
         accepted = dialog.exec() == QDialog.Accepted
         text = editor.toPlainText().strip()
-        code = language.currentText().strip().upper()
+        code = selected_language(language)
         dialog.deleteLater()
         if not accepted:
             return
@@ -1252,7 +1279,9 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
                 self.other_title_list.setCurrentRow(new_row)
             else:
                 self.session.set_title(text, index)
-                self.session.set_title_language(code, index)
+                unchanged = code.casefold() == (self.session.title_language(index) or '').casefold()
+                if not unchanged:
+                    self.session.set_title_language(code, index)
                 self._refresh()
                 self.other_title_list.setCurrentRow(index - 1)
         except (IndexError, ValueError) as exc:

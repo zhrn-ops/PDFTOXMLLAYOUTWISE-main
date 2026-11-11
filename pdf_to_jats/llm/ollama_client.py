@@ -8,6 +8,8 @@ import time
 from typing import Any
 import urllib.request
 
+from pdf_to_jats.llm.errors import LLMResponseError, provider_errors
+
 
 @dataclass(slots=True)
 class OllamaClient:
@@ -15,6 +17,7 @@ class OllamaClient:
     base_url: str = "http://localhost:11434"
     timeout_seconds: float = 120.0
 
+    @provider_errors
     def classify(self, prompt: str, payload: dict[str, Any], progress=None) -> dict[str, Any]:
         report = progress or (lambda message: None)
         started = time.perf_counter()
@@ -45,6 +48,8 @@ class OllamaClient:
         report("Waiting for Qwen to process the prompt and generate its response...")
         with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
             raw = json.loads(response.read().decode("utf-8"))
+        if not isinstance(raw, dict) or not isinstance(raw.get("message", {}), dict):
+            raise LLMResponseError("Ollama response has an invalid message structure.")
         elapsed = time.perf_counter() - sent
         report(f"Qwen request round trip: {elapsed:.2f} seconds.")
         for field, label in (
@@ -62,7 +67,12 @@ class OllamaClient:
         report("Parsing Qwen's structured response...")
         text = ((raw.get("message") or {}).get("content") or "")
         if isinstance(text, list):
+            if any(not isinstance(part, dict) or not isinstance(part.get("text", ""), str)
+                   for part in text):
+                raise LLMResponseError("Ollama message content has invalid text parts.")
             text = "".join(part.get("text", "") for part in text if isinstance(part, dict))
+        if not isinstance(text, str):
+            raise LLMResponseError("Ollama message content must be text.")
         if not text.strip():
             return {}
         try:

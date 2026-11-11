@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC TEST FIXTURE. Not a real research article or reviewed benchmark. -->
+<article>
+  <front><article-meta>
+    <title-group><article-title>Transport of H<sub>2</sub>O</article-title></title-group>
+    <contrib-group>
+      <contrib id="a1"><name><surname>Example</surname><given-names>Ada</given-names></name><xref ref-type="aff" rid="f1"/></contrib>
+      <contrib id="a2"><name><surname>Sample</surname><given-names>Ben</given-names></name><xref ref-type="aff" rid="f2"/></contrib>
+    </contrib-group>
+    <aff id="f1">Synthetic Institute A</aff><aff id="f2">Synthetic Institute B</aff>
+    <abstract><p>Flux equals μ × 2.</p></abstract>
+  </article-meta></front>
+  <body><sec id="methods"><title>Methods</title><p>Measure x<sup>2</sup> at 20 °C.</p></sec></body>
+</article>

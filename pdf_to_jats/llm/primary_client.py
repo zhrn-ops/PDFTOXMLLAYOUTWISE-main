@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import logging
 from typing import Any, Callable
 
+from pdf_to_jats.llm.errors import LLMError, LLMUnavailable
 from pdf_to_jats.llm.ollama_client import OllamaClient
 from pdf_to_jats.llm.openrouter_client import OpenRouterClient
 
@@ -29,16 +30,15 @@ class PrimaryLLMClient:
             response = self.ollama.classify(prompt, payload, progress=report)
             report("Qwen returned a response.")
             return response
-        except Exception as exc:
-            report(f"Qwen failed ({exc}); trying OpenRouter...")
-            logger.warning("Qwen via Ollama (%s) failed; trying OpenRouter: %s", self.ollama.model, exc)
+        except LLMError as exc:
+            report("Qwen unavailable; trying OpenRouter...")
+            logger.warning("Qwen unavailable (%s); trying OpenRouter", type(exc).__name__)
             try:
                 response = self.openrouter.classify(prompt, payload)
                 report("OpenRouter returned a response.")
                 return response
-            except Exception as fallback_exc:
-                report(f"OpenRouter failed ({fallback_exc}); using heuristic links.")
-                raise RuntimeError(
-                    f"Qwen via Ollama ({self.ollama.model}) failed: {exc}; "
-                    f"OpenRouter fallback failed: {fallback_exc}"
+            except LLMError as fallback_exc:
+                report("OpenRouter unavailable; using heuristic links.")
+                raise LLMUnavailable(
+                    "Qwen and OpenRouter failed; heuristic links require review."
                 ) from fallback_exc

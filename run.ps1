@@ -27,5 +27,4 @@ if (-not (Test-Path -LiteralPath $entrypoint)) {
     throw "Application entrypoint not found: $entrypoint"
 }
 
-& $python $entrypoint
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+& $python $entrypoint  

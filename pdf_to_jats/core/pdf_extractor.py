@@ -13,7 +13,6 @@ import fitz
 
 from pdf_to_jats.models.block import TextBlock, reading_order_key
 from pdf_to_jats.models.document import Document
-from pdf_to_jats.core.inline_script_detector import InlineScriptDetector
 from pdf_to_jats.core.rtl_text import has_presentation_forms, repair_positioned_lines
 
 try:  # numpy turns the per-line ink scan into C-speed slicing; it is optional.
@@ -69,7 +68,6 @@ class PDFExtractor:
         self.visible_text_only = visible_text_only
         self.dark_threshold = dark_threshold
         self.use_docling = use_docling
-        self.inline_script_detector = InlineScriptDetector()
         # Marker blocks from the last extract() call, used to infer the column
         # each article segment owns.
         self._marker_blocks: list[TextBlock] = []
@@ -87,6 +85,10 @@ class PDFExtractor:
             for page_index, page in enumerate(pdf, start=1):
                 visible_area = self._visible_page_rect(page)
                 text_dict = page.get_text("dict", clip=visible_area)
+                try:
+                    page_drawings = page.get_drawings()
+                except Exception:
+                    page_drawings = []
                 if any(has_presentation_forms(span.get('text', ''))
                        for block in text_dict.get('blocks', []) if block.get('type') == 0
                        for line in block.get('lines', []) for span in line.get('spans', [])):
@@ -111,7 +113,7 @@ class PDFExtractor:
                         line_bbox = fitz.Rect(line.get("bbox", bbox))
                         if not line_bbox.intersects(visible_area):
                             continue
-                        spans = line.get("spans", [])
+                        spans = self._inject_underscore_spans(line.get("spans", []), page_drawings)
                         text = self._line_text(spans)
                         if not text.strip():
                             continue
@@ -157,8 +159,12 @@ class PDFExtractor:
                                 "visible_text_only": self.visible_text_only,
                                 "noise_candidate": self._is_noise_candidate(text),
                             },
-                            inline_runs=self.inline_script_detector.detect(text.strip(), spans),
                         )
+                        # Superscript/subscript runs are not attached here: only
+                        # the title and abstract are scripted for export, and
+                        # the GUI derives those runs from "text_spans" once the
+                        # block's role is known. Detecting on every body line
+                        # produced chemistry/unit scripts in ordinary text.
                         self._attach_docling_evidence(extracted, docling_items)
                         page_blocks.append(extracted)
 
@@ -276,6 +282,96 @@ class PDFExtractor:
 
     def _line_text(self, spans: list[dict[str, Any]]) -> str:
         return "".join(span.get("text", "") for span in spans)
+
+    @staticmethod
+    def _inject_underscore_spans(
+        spans: list[dict[str, Any]], drawings: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Recover underscores that a PDF drew as vector lines.
+
+        Some fonts/publishers render ``_`` as a short horizontal rule, and
+        PyMuPDF then reports the position as a space glyph (``" "``) whose
+        bounding box exactly covers the rule.  Replace such a space span with
+        ``_`` when a matching horizontal drawing exists; also handle the rarer
+        case of a pure rule with no text span at all by inserting a synthetic
+        span in the gap between two neighbours.
+        """
+        if not spans:
+            return []
+        result: list[dict[str, Any]] = []
+        for index, span in enumerate(spans):
+            item = dict(span)
+            bbox = item.get("bbox") or [0, 0, 0, 0]
+            text = str(item.get("text", ""))
+            is_space = text.strip() == ""
+            matched_drawing = None
+            if is_space and drawings:
+                for drawing in drawings:
+                    rect = drawing.get("rect")
+                    if rect is None:
+                        continue
+                    try:
+                        if rect.height > 1.5 or rect.width < 1.0:
+                            continue
+                        if abs(float(rect.x0) - float(bbox[0])) > 1.5 or abs(float(rect.x1) - float(bbox[2])) > 1.5:
+                            continue
+                        if abs(float(rect.y0) - float(bbox[3])) > 2.5:
+                            continue
+                        items = drawing.get("items") or []
+                        if items and str(items[0][0]) not in {"l", "re"}:
+                            continue
+                        matched_drawing = rect
+                        break
+                    except Exception:
+                        continue
+            if matched_drawing is not None:
+                item["text"] = "_"
+            result.append(item)
+
+            # Pure-rule fallback: a horizontal stroke in the gap between two
+            # spans with no corresponding space glyph.
+            if index + 1 < len(spans) and drawings:
+                next_span = spans[index + 1]
+                next_bbox = next_span.get("bbox") or [0, 0, 0, 0]
+                gap_start = float(bbox[2])
+                gap_end = float(next_bbox[0])
+                if gap_end - gap_start >= 1.0:
+                    origin = item.get("origin") or [0.0, bbox[3]]
+                    baseline = float(origin[1]) if len(origin) > 1 else float(bbox[3])
+                    size = float(item.get("size", 0.0) or 0.0) or 10.0
+                    max_width = max(12.0, size * 1.6)
+                    matches = []
+                    for drawing in drawings:
+                        rect = drawing.get("rect")
+                        if rect is None:
+                            continue
+                        try:
+                            if rect.height > 1.5 or rect.width < 1.0 or rect.width > max_width:
+                                continue
+                            if not (gap_start - 1.5 <= float(rect.x0) and float(rect.x1) <= gap_end + 1.5):
+                                continue
+                            if abs(float(rect.y0) - baseline) > 2.5:
+                                continue
+                            items = drawing.get("items") or []
+                            if items and str(items[0][0]) not in {"l", "re"}:
+                                continue
+                            matches.append(rect)
+                        except Exception:
+                            continue
+                    matches.sort(key=lambda r: float(r.x0))
+                    for rect in matches:
+                        pseudo = dict(item)
+                        pseudo.update(
+                            text="_",
+                            size=size,
+                            flags=0,
+                            font=item.get("font", ""),
+                            color=item.get("color", ""),
+                            bbox=[float(rect.x0), float(rect.y0) - size, float(rect.x1), float(rect.y0)],
+                            origin=[float(rect.x0), float(rect.y0)],
+                        )
+                        result.append(pseudo)
+        return result
 
     @staticmethod
     def _script_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:

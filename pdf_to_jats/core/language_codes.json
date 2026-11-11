@@ -1,0 +1,429 @@
+[
+  {
+    "name": "Afrikaans",
+    "alpha3": "AFR",
+    "alpha2": "AF",
+    "alpha4": "AFRK"
+  },
+  {
+    "name": "Albanian",
+    "alpha3": "ALB",
+    "alpha2": "SQ",
+    "alpha4": "ALBA"
+  },
+  {
+    "name": "Arabic",
+    "alpha3": "ARA",
+    "alpha2": "AR",
+    "alpha4": "ARAB"
+  },
+  {
+    "name": "Armenian",
+    "alpha3": "ARM",
+    "alpha2": "HY",
+    "alpha4": "ARME"
+  },
+  {
+    "name": "Azerbaijani",
+    "alpha3": "AZE",
+    "alpha2": "AZ",
+    "alpha4": "AZRB"
+  },
+  {
+    "name": "Indonesian",
+    "alpha3": "IND",
+    "alpha2": "ID",
+    "alpha4": "BAHA"
+  },
+  {
+    "name": "Basque",
+    "alpha3": "BAQ",
+    "alpha2": "EU",
+    "alpha4": "BASQ"
+  },
+  {
+    "name": "Bengali",
+    "alpha3": "BEN",
+    "alpha2": "BN",
+    "alpha4": "BENG"
+  },
+  {
+    "name": "Bosnian",
+    "alpha3": "BOS",
+    "alpha2": "BS",
+    "alpha4": "BOSN"
+  },
+  {
+    "name": "Bulgarian",
+    "alpha3": "BUL",
+    "alpha2": "BG",
+    "alpha4": "BULG"
+  },
+  {
+    "name": "Burmese",
+    "alpha3": "BUR",
+    "alpha2": "MY",
+    "alpha4": "BURM"
+  },
+  {
+    "name": "Belarusian",
+    "alpha3": "BEL",
+    "alpha2": "BE",
+    "alpha4": "BYEL"
+  },
+  {
+    "name": "Catalan",
+    "alpha3": "CAT",
+    "alpha2": "CA",
+    "alpha4": "CATA"
+  },
+  {
+    "name": "Chinese",
+    "alpha3": "CHI",
+    "alpha2": "ZH",
+    "alpha4": "CHIN"
+  },
+  {
+    "name": "Croatian",
+    "alpha3": "HRV",
+    "alpha2": "HR",
+    "alpha4": null
+  },
+  {
+    "name": "Czech",
+    "alpha3": "CZE",
+    "alpha2": "CS",
+    "alpha4": "CZCH"
+  },
+  {
+    "name": "Danish",
+    "alpha3": "DAN",
+    "alpha2": "DA",
+    "alpha4": "DANS"
+  },
+  {
+    "name": "Dutch",
+    "alpha3": "DUT",
+    "alpha2": "NL",
+    "alpha4": "DUTC"
+  },
+  {
+    "name": "English",
+    "alpha3": "ENG",
+    "alpha2": "EN",
+    "alpha4": "ENGL"
+  },
+  {
+    "name": "Esperanto",
+    "alpha3": "EPO",
+    "alpha2": "EO",
+    "alpha4": "ESPE"
+  },
+  {
+    "name": "Estonian",
+    "alpha3": "EST",
+    "alpha2": "ET",
+    "alpha4": "ESTO"
+  },
+  {
+    "name": "Finnish",
+    "alpha3": "FIN",
+    "alpha2": "FI",
+    "alpha4": "FINN"
+  },
+  {
+    "name": "French",
+    "alpha3": "FRE",
+    "alpha2": "FR",
+    "alpha4": "FREN"
+  },
+  {
+    "name": "Irish Gaelic",
+    "alpha3": "GLE",
+    "alpha2": "GA",
+    "alpha4": "GAEL"
+  },
+  {
+    "name": "Gallegan",
+    "alpha3": "GLG",
+    "alpha2": "GL",
+    "alpha4": "GALL"
+  },
+  {
+    "name": "Georgian",
+    "alpha3": "GEO",
+    "alpha2": "KA",
+    "alpha4": "GEOR"
+  },
+  {
+    "name": "German",
+    "alpha3": "GER",
+    "alpha2": "DE",
+    "alpha4": "GERM"
+  },
+  {
+    "name": "Greek",
+    "alpha3": "GRE",
+    "alpha2": "EL",
+    "alpha4": "GREK"
+  },
+  {
+    "name": "Hebrew",
+    "alpha3": "HEB",
+    "alpha2": "HE",
+    "alpha4": "HEBR"
+  },
+  {
+    "name": "Hindi",
+    "alpha3": "HIN",
+    "alpha2": "HI",
+    "alpha4": "INDI"
+  },
+  {
+    "name": "Hungarian",
+    "alpha3": "HUN",
+    "alpha2": "HU",
+    "alpha4": "HUNG"
+  },
+  {
+    "name": "Icelandic",
+    "alpha3": "ICE",
+    "alpha2": "IS",
+    "alpha4": "ICEL"
+  },
+  {
+    "name": "Italian",
+    "alpha3": "ITA",
+    "alpha2": "IT",
+    "alpha4": "ITAL"
+  },
+  {
+    "name": "Japanese",
+    "alpha3": "JPN",
+    "alpha2": "JA",
+    "alpha4": "JAPA"
+  },
+  {
+    "name": "Kazakh",
+    "alpha3": "KAZ",
+    "alpha2": "KK",
+    "alpha4": null
+  },
+  {
+    "name": "Kyrgz",
+    "alpha3": "KIR",
+    "alpha2": "KY",
+    "alpha4": null,
+    "aliases": [
+      "Kirghiz"
+    ]
+  },
+  {
+    "name": "Korean",
+    "alpha3": "KOR",
+    "alpha2": "KO",
+    "alpha4": "KORA"
+  },
+  {
+    "name": "Latin",
+    "alpha3": "LAT",
+    "alpha2": "LA",
+    "alpha4": null
+  },
+  {
+    "name": "Laotian",
+    "alpha3": "LAO",
+    "alpha2": "LO",
+    "alpha4": null
+  },
+  {
+    "name": "Latvian",
+    "alpha3": "LAV",
+    "alpha2": "LV",
+    "alpha4": "LATV"
+  },
+  {
+    "name": "Lithuanian",
+    "alpha3": "LIT",
+    "alpha2": "LT",
+    "alpha4": "LITH"
+  },
+  {
+    "name": "Macedonian",
+    "alpha3": "MAC",
+    "alpha2": "MK",
+    "alpha4": "MACE"
+  },
+  {
+    "name": "Malay",
+    "alpha3": "MAY",
+    "alpha2": "MS",
+    "alpha4": "MALA"
+  },
+  {
+    "name": "Maori",
+    "alpha3": "MAO",
+    "alpha2": "MI",
+    "alpha4": "MAOR"
+  },
+  {
+    "name": "Mongolian",
+    "alpha3": "MON",
+    "alpha2": "MN",
+    "alpha4": "MONG"
+  },
+  {
+    "name": "Nepali",
+    "alpha3": "NEP",
+    "alpha2": "NE",
+    "alpha4": null
+  },
+  {
+    "name": "Norwegian",
+    "alpha3": "NOR",
+    "alpha2": "NO",
+    "alpha4": "NORW"
+  },
+  {
+    "name": "Persian",
+    "alpha3": "PER",
+    "alpha2": "FA",
+    "alpha4": "PERS"
+  },
+  {
+    "name": "Polish",
+    "alpha3": "POL",
+    "alpha2": "PL",
+    "alpha4": "POLS"
+  },
+  {
+    "name": "Polyglot",
+    "alpha3": "MAP",
+    "alpha2": "XX",
+    "alpha4": "POLY"
+  },
+  {
+    "name": "Portuguese",
+    "alpha3": "POR",
+    "alpha2": "PT",
+    "alpha4": "PORT"
+  },
+  {
+    "name": "Pushto",
+    "alpha3": "PUS",
+    "alpha2": "PS",
+    "alpha4": "PUSH"
+  },
+  {
+    "name": "Romanian",
+    "alpha3": "RUM",
+    "alpha2": "RO",
+    "alpha4": "RUMA",
+    "aliases": [
+      "Moldavian",
+      "Moldovan"
+    ]
+  },
+  {
+    "name": "Russian",
+    "alpha3": "RUS",
+    "alpha2": "RU",
+    "alpha4": "RUSS"
+  },
+  {
+    "name": "Scottish Gaelic",
+    "alpha3": "GLA",
+    "alpha2": "GD",
+    "alpha4": "SCOT"
+  },
+  {
+    "name": "Serbian",
+    "alpha3": "SRP",
+    "alpha2": "SR",
+    "alpha4": null
+  },
+  {
+    "name": "Sinhalese",
+    "alpha3": "SIN",
+    "alpha2": "SI",
+    "alpha4": "SINH"
+  },
+  {
+    "name": "Slovak",
+    "alpha3": "SLO",
+    "alpha2": "SK",
+    "alpha4": "SLVK"
+  },
+  {
+    "name": "Slovene",
+    "alpha3": "SLV",
+    "alpha2": "SL",
+    "alpha4": "SLVN"
+  },
+  {
+    "name": "Spanish",
+    "alpha3": "SPA",
+    "alpha2": "ES",
+    "alpha4": "SPAN"
+  },
+  {
+    "name": "Swedish",
+    "alpha3": "SWE",
+    "alpha2": "SV",
+    "alpha4": "SWED"
+  },
+  {
+    "name": "Tagalog",
+    "alpha3": "TGL",
+    "alpha2": "TL",
+    "alpha4": "TAGA"
+  },
+  {
+    "name": "Tajik",
+    "alpha3": "TGK",
+    "alpha2": "TG",
+    "alpha4": null
+  },
+  {
+    "name": "Thai",
+    "alpha3": "THA",
+    "alpha2": "TH",
+    "alpha4": "THAI"
+  },
+  {
+    "name": "Turkish",
+    "alpha3": "TUR",
+    "alpha2": "TR",
+    "alpha4": "TURK"
+  },
+  {
+    "name": "Ukrainian",
+    "alpha3": "UKR",
+    "alpha2": "UK",
+    "alpha4": "UKRA"
+  },
+  {
+    "name": "Urdu",
+    "alpha3": "URD",
+    "alpha2": "UR",
+    "alpha4": "URDU"
+  },
+  {
+    "name": "Uzbek",
+    "alpha3": "UZB",
+    "alpha2": "UZ",
+    "alpha4": "UZBE"
+  },
+  {
+    "name": "Vietnamese",
+    "alpha3": "VIE",
+    "alpha2": "VI",
+    "alpha4": "VIET"
+  },
+  {
+    "name": "Welsh",
+    "alpha3": "WEL",
+    "alpha2": "CY",
+    "alpha4": null
+  }
+]

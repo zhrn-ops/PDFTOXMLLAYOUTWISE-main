@@ -10,7 +10,8 @@ import unicodedata
 
 from lxml import etree
 from pdf_to_jats.core.country_codes import country_code, normalize_country_elements
-from pdf_to_jats.core.title_order import english_titles_first, non_english_title, remove_title_scripts
+from pdf_to_jats.core.language_codes import is_language_code
+from pdf_to_jats.core.title_order import english_titles_first
 from pdf_to_jats.core.atomic_io import atomic_write_bytes
 from pdf_to_jats.core.xml_revisions import XmlRevision, validation_record
 from pdf_to_jats.core.xml_validation import (
@@ -742,8 +743,6 @@ class XmlDocumentSession:
         node = self.title_node() if field == "title" else self.abstract_node()
         if node is None:
             raise ValueError("No editable field found")
-        if field == "title" and tag != "normal" and non_english_title(self.title_language()):
-            raise ValueError("Superscript and subscript are allowed only for English titles")
         allowed = {"p", "para", "abstract", "abstracts", "sup", "inf", "sub"}
         if any(self._local_name(child) not in allowed for child in node.iter() if child is not node):
             raise ValueError("This field contains formatting that cannot safely be changed here")
@@ -779,7 +778,7 @@ class XmlDocumentSession:
         self._set_text(node, value, preserve_scripts=True)
 
     def set_title_language(self, value: str, index: int = 0) -> None:
-        """Write the BCP-47 code used as ``xml:lang`` on a title."""
+        """Write the three-letter language code used as ``xml:lang``."""
 
         node = self.title_node(index)
         if node is None:
@@ -788,6 +787,10 @@ class XmlDocumentSession:
         attribute = self._xml_lang_attr()
         if language == self.title_language(index):
             return
+        if language and not is_language_code(language):
+            raise ValueError(
+                f"Language {language!r} needs review: select a valid three-letter language code."
+            )
         target = node
         if self._local_name(node) == "trans-title":
             group = node.getparent()
@@ -801,14 +804,17 @@ class XmlDocumentSession:
             # The title element must not keep an older language that would
             # override the group it now belongs to.
             node.attrib.pop(attribute, None)
-        if non_english_title(language):
-            remove_title_scripts(node)
         self.dirty = True
         self.validation = []
 
     def add_title(self, value: str, language: str = "") -> None:
         """Append a translated title next to the existing article title."""
 
+        language = str(language or "").strip()
+        if language and not is_language_code(language):
+            raise ValueError(
+                f"Language {language!r} needs review: select a valid three-letter language code."
+            )
         container = self._title_container()
         if container is None:
             raise ValueError("This XML profile has no safely mapped title container")
@@ -818,13 +824,13 @@ class XmlDocumentSession:
         parent = container
         if jats:
             parent = etree.SubElement(container, qname("trans-title-group"))
-            if language.strip():
-                parent.set(self._xml_lang_attr(), language.strip())
+            if language:
+                parent.set(self._xml_lang_attr(), language)
             node = etree.SubElement(parent, qname("trans-title"))
         else:
             node = etree.SubElement(container, qname("titletext"))
-            if language.strip():
-                node.set(self._xml_lang_attr(), language.strip())
+            if language:
+                node.set(self._xml_lang_attr(), language)
             node.set("original", "n")
         self._set_text(node, value)
 

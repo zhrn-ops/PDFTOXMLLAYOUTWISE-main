@@ -21,12 +21,12 @@ class Validator:
     """Validate XML with an explicit format/profile, plus document content."""
 
     def __init__(self, schema_path: Path | None = None) -> None:
-        self.schema_path = schema_path or Path(__file__).resolve().parents[1] / "schemas" / "jats_1_4.xsd"
+        self.schema_path = schema_path
 
     def validate_result(self, xml_path: Path, profile: SchemaProfile | None = None) -> ValidationResult:
         """Return independent syntax/schema/semantic results for exact file bytes."""
-        if profile is None and self.schema_path.exists():
-            profile = SchemaProfile("JATS legacy schema", "JATS", self.schema_path)
+        if profile is None and self.schema_path is not None and self.schema_path.exists():
+            profile = SchemaProfile("Explicit JATS schema", "JATS", self.schema_path)
         return validate_xml(xml_path.read_bytes(), profile)
 
     def validate(self, xml_path: Path) -> list[ValidationError]:

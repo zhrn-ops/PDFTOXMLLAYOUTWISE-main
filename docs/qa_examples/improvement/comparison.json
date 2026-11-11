@@ -1,0 +1,2107 @@
+{
+  "before_run": "55521c9db045ac87c49ae19876d05acac59d27532df6bc63b9f48a42e1807b92",
+  "after_run": "ab116e3ac8d06846d6d932e15b0e6f9be7c6243f0113b4c9ca44b3a658b8b474",
+  "before_converter": {
+    "build_id": "synthetic-bad",
+    "commit": "synthetic-fixture-not-a-converter",
+    "dirty": false
+  },
+  "after_converter": {
+    "build_id": "synthetic-good",
+    "commit": "synthetic-fixture-not-a-converter",
+    "dirty": false
+  },
+  "aggregate_changes": [
+    {
+      "metric": "article_count",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "coverage.articles_with_unknown_denominator",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "coverage.evaluated_fraction",
+      "before": 0.9391304347826087,
+      "after": 1.0,
+      "delta": 0.060869565217391286,
+      "change": "improved"
+    },
+    {
+      "metric": "coverage.matched_characters",
+      "before": 108,
+      "after": 115,
+      "delta": 7,
+      "change": "changed"
+    },
+    {
+      "metric": "coverage.reference_characters",
+      "before": 115,
+      "after": 115,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "critical_errors.corrupted_math_symbol",
+      "before": 2,
+      "after": 0,
+      "delta": -2,
+      "change": "improved"
+    },
+    {
+      "metric": "critical_errors.incorrect_author_affiliation",
+      "before": 2,
+      "after": 0,
+      "delta": -2,
+      "change": "improved"
+    },
+    {
+      "metric": "critical_errors.lost_script",
+      "before": 2,
+      "after": 0,
+      "delta": -2,
+      "change": "improved"
+    },
+    {
+      "metric": "critical_errors.missing_scientific_content",
+      "before": 7,
+      "after": 0,
+      "delta": -7,
+      "change": "improved"
+    },
+    {
+      "metric": "critical_errors.missing_section",
+      "before": 1,
+      "after": 0,
+      "delta": -1,
+      "change": "improved"
+    },
+    {
+      "metric": "failed_articles",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.affiliations.f1",
+      "before": 0.6666666666666666,
+      "after": 1.0,
+      "delta": 0.33333333333333337,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.affiliations.fn",
+      "before": 1,
+      "after": 0,
+      "delta": -1,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.affiliations.fp",
+      "before": 1,
+      "after": 0,
+      "delta": -1,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.affiliations.precision",
+      "before": 0.6666666666666666,
+      "after": 1.0,
+      "delta": 0.33333333333333337,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.affiliations.recall",
+      "before": 0.6666666666666666,
+      "after": 1.0,
+      "delta": 0.33333333333333337,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.affiliations.tp",
+      "before": 2,
+      "after": 3,
+      "delta": 1,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.characters.error_rate",
+      "before": 0.0782608695652174,
+      "after": 0.0,
+      "delta": -0.0782608695652174,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.characters.errors",
+      "before": 9,
+      "after": 0,
+      "delta": -9,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.characters.macro_articles",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.characters.macro_error_rate",
+      "before": 0.07377049180327869,
+      "after": 0.0,
+      "delta": -0.07377049180327869,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.characters.reference_count",
+      "before": 115,
+      "after": 115,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.exact_units.accuracy",
+      "before": 0.7142857142857143,
+      "after": 1.0,
+      "delta": 0.2857142857142857,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.exact_units.correct",
+      "before": 5,
+      "after": 7,
+      "delta": 2,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.exact_units.reference_count",
+      "before": 7,
+      "after": 7,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.math_symbols.error_rate",
+      "before": 0.5,
+      "after": 0.0,
+      "delta": -0.5,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.math_symbols.errors",
+      "before": 2,
+      "after": 0,
+      "delta": -2,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.math_symbols.macro_articles",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.math_symbols.macro_error_rate",
+      "before": 0.5,
+      "after": 0.0,
+      "delta": -0.5,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.math_symbols.reference_count",
+      "before": 4,
+      "after": 4,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.normalized_characters.error_rate",
+      "before": 0.0782608695652174,
+      "after": 0.0,
+      "delta": -0.0782608695652174,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.normalized_characters.errors",
+      "before": 9,
+      "after": 0,
+      "delta": -9,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.normalized_characters.macro_articles",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.normalized_characters.macro_error_rate",
+      "before": 0.07377049180327869,
+      "after": 0.0,
+      "delta": -0.07377049180327869,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.normalized_characters.reference_count",
+      "before": 115,
+      "after": 115,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.reading_order.accuracy",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.reading_order.comparable_pairs",
+      "before": 6,
+      "after": 9,
+      "delta": 3,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.reading_order.correct",
+      "before": 6,
+      "after": 9,
+      "delta": 3,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.reading_order.coverage",
+      "before": 0.6666666666666666,
+      "after": 1.0,
+      "delta": 0.33333333333333337,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.reading_order.expected_pairs",
+      "before": 9,
+      "after": 9,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.reading_order.reviewed_articles",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.abstract.f1",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.abstract.fn",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.abstract.fp",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.abstract.precision",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.abstract.recall",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.abstract.tp",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.body.f1",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.body.fn",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.body.fp",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.body.precision",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.body.recall",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.body.tp",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.section.f1",
+      "before": 0.0,
+      "after": 1.0,
+      "delta": 1.0,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.roles.section.fn",
+      "before": 1,
+      "after": 0,
+      "delta": -1,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.roles.section.fp",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.section.precision",
+      "before": null,
+      "after": 1.0,
+      "delta": null,
+      "change": "not_comparable"
+    },
+    {
+      "metric": "metrics.roles.section.recall",
+      "before": 0.0,
+      "after": 1.0,
+      "delta": 1.0,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.roles.section.tp",
+      "before": 0,
+      "after": 1,
+      "delta": 1,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.roles.title.f1",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.title.fn",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.title.fp",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.title.precision",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.title.recall",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.roles.title.tp",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sub.f1",
+      "before": 0.6666666666666666,
+      "after": 1.0,
+      "delta": 0.33333333333333337,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sub.fn",
+      "before": 1,
+      "after": 0,
+      "delta": -1,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sub.fp",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sub.precision",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sub.recall",
+      "before": 0.5,
+      "after": 1.0,
+      "delta": 0.5,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sub.tp",
+      "before": 1,
+      "after": 2,
+      "delta": 1,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sup.f1",
+      "before": 0.6666666666666666,
+      "after": 1.0,
+      "delta": 0.33333333333333337,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sup.fn",
+      "before": 1,
+      "after": 0,
+      "delta": -1,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sup.fp",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sup.precision",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sup.recall",
+      "before": 0.5,
+      "after": 1.0,
+      "delta": 0.5,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.by_type.sup.tp",
+      "before": 1,
+      "after": 2,
+      "delta": 1,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.scripts.characters.f1",
+      "before": 0.6666666666666666,
+      "after": 1.0,
+      "delta": 0.33333333333333337,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.characters.fn",
+      "before": 2,
+      "after": 0,
+      "delta": -2,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.characters.fp",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.characters.precision",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.characters.recall",
+      "before": 0.5,
+      "after": 1.0,
+      "delta": 0.5,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.characters.tp",
+      "before": 2,
+      "after": 4,
+      "delta": 2,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.scripts.f1",
+      "before": 0.6666666666666666,
+      "after": 1.0,
+      "delta": 0.33333333333333337,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.fn",
+      "before": 2,
+      "after": 0,
+      "delta": -2,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.fp",
+      "before": 0,
+      "after": 0,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.precision",
+      "before": 1.0,
+      "after": 1.0,
+      "delta": 0.0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.scripts.recall",
+      "before": 0.5,
+      "after": 1.0,
+      "delta": 0.5,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.scripts.tp",
+      "before": 2,
+      "after": 4,
+      "delta": 2,
+      "change": "changed"
+    },
+    {
+      "metric": "metrics.tokens.error_rate",
+      "before": 0.1111111111111111,
+      "after": 0.0,
+      "delta": -0.1111111111111111,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.tokens.errors",
+      "before": 3,
+      "after": 0,
+      "delta": -3,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.tokens.macro_articles",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.tokens.macro_error_rate",
+      "before": 0.10714285714285714,
+      "after": 0.0,
+      "delta": -0.10714285714285714,
+      "change": "improved"
+    },
+    {
+      "metric": "metrics.tokens.reference_count",
+      "before": 27,
+      "after": 27,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.xml_structure.comparable_articles",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    },
+    {
+      "metric": "metrics.xml_structure.difference_count",
+      "before": 7,
+      "after": 0,
+      "delta": -7,
+      "change": "improved"
+    },
+    {
+      "metric": "scored_articles",
+      "before": 2,
+      "after": 2,
+      "delta": 0,
+      "change": "unchanged"
+    }
+  ],
+  "articles": [
+    {
+      "id": "synthetic-ani",
+      "before_status": "evaluated",
+      "after_status": "evaluated",
+      "performance_changes": [],
+      "performance_comparable": false,
+      "coverage_gate_before": true,
+      "coverage_gate_after": true,
+      "changes": [
+        {
+          "metric": "coverage.evaluated_fraction",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.matched_characters",
+          "before": 54,
+          "after": 54,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.matched_units",
+          "before": 3,
+          "after": 3,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.reference_characters",
+          "before": 54,
+          "after": 54,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.reference_units",
+          "before": 3,
+          "after": 3,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.supported_characters",
+          "before": 54,
+          "after": 54,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.supported_fraction",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "critical_errors.corrupted_math_symbol",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "critical_errors.incorrect_author_affiliation",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "critical_errors.lost_script",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "critical_errors.missing_scientific_content",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "critical_errors.missing_section",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.affiliation_coverage",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.author_coverage",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.candidate_count",
+          "before": 54,
+          "after": 54,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.deletions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.error_rate",
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.errors",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.insertions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.reference_count",
+          "before": 54,
+          "after": 54,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.substitutions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.exact_units.accuracy",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.exact_units.correct",
+          "before": 3,
+          "after": 3,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.exact_units.reference_count",
+          "before": 3,
+          "after": 3,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.math_symbols.error_rate",
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.math_symbols.errors",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.math_symbols.reference_count",
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.candidate_count",
+          "before": 54,
+          "after": 54,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.deletions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.error_rate",
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.errors",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.insertions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.reference_count",
+          "before": 54,
+          "after": 54,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.substitutions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.reading_order.accuracy",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.reading_order.comparable_pairs",
+          "before": 3,
+          "after": 3,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.reading_order.correct",
+          "before": 3,
+          "after": 3,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.reading_order.coverage",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.reading_order.expected_pairs",
+          "before": 3,
+          "after": 3,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.reading_order.inversions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.characters.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.characters.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.characters.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.characters.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.characters.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.characters.tp",
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.tp",
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.candidate_count",
+          "before": 13,
+          "after": 13,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.deletions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.error_rate",
+          "before": 0.0,
+          "after": 0.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.errors",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.insertions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.reference_count",
+          "before": 13,
+          "after": 13,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.substitutions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.xml_structure.difference_count",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        }
+      ]
+    },
+    {
+      "id": "synthetic-jats",
+      "before_status": "evaluated",
+      "after_status": "evaluated",
+      "performance_changes": [],
+      "performance_comparable": false,
+      "coverage_gate_before": false,
+      "coverage_gate_after": true,
+      "changes": [
+        {
+          "metric": "coverage.evaluated_fraction",
+          "before": 0.8852459016393442,
+          "after": 1.0,
+          "delta": 0.11475409836065575,
+          "change": "improved"
+        },
+        {
+          "metric": "coverage.matched_characters",
+          "before": 54,
+          "after": 61,
+          "delta": 7,
+          "change": "changed"
+        },
+        {
+          "metric": "coverage.matched_units",
+          "before": 3,
+          "after": 4,
+          "delta": 1,
+          "change": "changed"
+        },
+        {
+          "metric": "coverage.reference_characters",
+          "before": 61,
+          "after": 61,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.reference_units",
+          "before": 4,
+          "after": 4,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.supported_characters",
+          "before": 61,
+          "after": 61,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "coverage.supported_fraction",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "critical_errors.corrupted_math_symbol",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "improved"
+        },
+        {
+          "metric": "critical_errors.incorrect_author_affiliation",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "improved"
+        },
+        {
+          "metric": "critical_errors.lost_script",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "improved"
+        },
+        {
+          "metric": "critical_errors.missing_scientific_content",
+          "before": 7,
+          "after": 0,
+          "delta": -7,
+          "change": "improved"
+        },
+        {
+          "metric": "critical_errors.missing_section",
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.affiliations.affiliation_coverage",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.author_coverage",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.affiliations.f1",
+          "before": 0.5,
+          "after": 1.0,
+          "delta": 0.5,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.affiliations.fn",
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.affiliations.fp",
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.affiliations.precision",
+          "before": 0.5,
+          "after": 1.0,
+          "delta": 0.5,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.affiliations.recall",
+          "before": 0.5,
+          "after": 1.0,
+          "delta": 0.5,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.affiliations.tp",
+          "before": 1,
+          "after": 2,
+          "delta": 1,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.characters.candidate_count",
+          "before": 54,
+          "after": 61,
+          "delta": 7,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.characters.deletions",
+          "before": 7,
+          "after": 0,
+          "delta": -7,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.characters.error_rate",
+          "before": 0.14754098360655737,
+          "after": 0.0,
+          "delta": -0.14754098360655737,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.characters.errors",
+          "before": 9,
+          "after": 0,
+          "delta": -9,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.characters.insertions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.reference_count",
+          "before": 61,
+          "after": 61,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.characters.substitutions",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.exact_units.accuracy",
+          "before": 0.5,
+          "after": 1.0,
+          "delta": 0.5,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.exact_units.correct",
+          "before": 2,
+          "after": 4,
+          "delta": 2,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.exact_units.reference_count",
+          "before": 4,
+          "after": 4,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.math_symbols.error_rate",
+          "before": 1.0,
+          "after": 0.0,
+          "delta": -1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.math_symbols.errors",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.math_symbols.reference_count",
+          "before": 2,
+          "after": 2,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.candidate_count",
+          "before": 54,
+          "after": 61,
+          "delta": 7,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.normalized_characters.deletions",
+          "before": 7,
+          "after": 0,
+          "delta": -7,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.normalized_characters.error_rate",
+          "before": 0.14754098360655737,
+          "after": 0.0,
+          "delta": -0.14754098360655737,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.normalized_characters.errors",
+          "before": 9,
+          "after": 0,
+          "delta": -9,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.normalized_characters.insertions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.reference_count",
+          "before": 61,
+          "after": 61,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.normalized_characters.substitutions",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.reading_order.accuracy",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.reading_order.comparable_pairs",
+          "before": 3,
+          "after": 6,
+          "delta": 3,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.reading_order.correct",
+          "before": 3,
+          "after": 6,
+          "delta": 3,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.reading_order.coverage",
+          "before": 0.5,
+          "after": 1.0,
+          "delta": 0.5,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.reading_order.expected_pairs",
+          "before": 6,
+          "after": 6,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.reading_order.inversions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.abstract.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.body.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.section.f1",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.roles.section.fn",
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.roles.section.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.section.precision",
+          "before": null,
+          "after": 1.0,
+          "delta": null,
+          "change": "not_comparable"
+        },
+        {
+          "metric": "metrics.roles.section.recall",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.roles.section.tp",
+          "before": 0,
+          "after": 1,
+          "delta": 1,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.roles.title.f1",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.fn",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.precision",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.recall",
+          "before": 1.0,
+          "after": 1.0,
+          "delta": 0.0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.roles.title.tp",
+          "before": 1,
+          "after": 1,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.f1",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.fn",
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.precision",
+          "before": null,
+          "after": 1.0,
+          "delta": null,
+          "change": "not_comparable"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.recall",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sub.tp",
+          "before": 0,
+          "after": 1,
+          "delta": 1,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.f1",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.fn",
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.precision",
+          "before": null,
+          "after": 1.0,
+          "delta": null,
+          "change": "not_comparable"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.recall",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.by_type.sup.tp",
+          "before": 0,
+          "after": 1,
+          "delta": 1,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.scripts.characters.f1",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.characters.fn",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.characters.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.characters.precision",
+          "before": null,
+          "after": 1.0,
+          "delta": null,
+          "change": "not_comparable"
+        },
+        {
+          "metric": "metrics.scripts.characters.recall",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.characters.tp",
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.scripts.f1",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.fn",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.fp",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.scripts.precision",
+          "before": null,
+          "after": 1.0,
+          "delta": null,
+          "change": "not_comparable"
+        },
+        {
+          "metric": "metrics.scripts.recall",
+          "before": 0.0,
+          "after": 1.0,
+          "delta": 1.0,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.scripts.tp",
+          "before": 0,
+          "after": 2,
+          "delta": 2,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.tokens.candidate_count",
+          "before": 13,
+          "after": 14,
+          "delta": 1,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.tokens.deletions",
+          "before": 1,
+          "after": 0,
+          "delta": -1,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.tokens.error_rate",
+          "before": 0.21428571428571427,
+          "after": 0.0,
+          "delta": -0.21428571428571427,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.tokens.errors",
+          "before": 3,
+          "after": 0,
+          "delta": -3,
+          "change": "improved"
+        },
+        {
+          "metric": "metrics.tokens.insertions",
+          "before": 0,
+          "after": 0,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.reference_count",
+          "before": 14,
+          "after": 14,
+          "delta": 0,
+          "change": "unchanged"
+        },
+        {
+          "metric": "metrics.tokens.substitutions",
+          "before": 2,
+          "after": 0,
+          "delta": -2,
+          "change": "changed"
+        },
+        {
+          "metric": "metrics.xml_structure.difference_count",
+          "before": 7,
+          "after": 0,
+          "delta": -7,
+          "change": "improved"
+        }
+      ]
+    }
+  ],
+  "performance_regression_detected": false,
+  "regression_detected": false
+}

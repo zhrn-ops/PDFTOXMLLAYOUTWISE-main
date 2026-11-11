@@ -70,7 +70,7 @@ def test_title_tab_captures_second_title(qapp):
     try:
         assert window.load_xml_text(ANI_XML, Path('multi-title.xml'))
         assert window.title_edit.toPlainText() == 'English title'
-        assert window.title_language.currentText() == 'ENG'
+        assert window.title_language.currentData() == 'ENG'
         assert window.other_title_list.count() == 0
 
         window.session.add_title('عنوان فارسی', 'FAS')

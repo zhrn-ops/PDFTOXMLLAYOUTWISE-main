@@ -1,0 +1,63 @@
+{
+  "contract_version": 1,
+  "corpus_id": "synthetic-demo",
+  "manifest_version": "1",
+  "kind": "synthetic",
+  "coverage_threshold": 0.95,
+  "articles": [
+    {
+      "id": "synthetic-jats",
+      "pdf": {
+        "path": "synthetic.pdf",
+        "sha256": "fb37b2c7f8e948820a866c6fba5fe5dfdeea01025e9c92ad4a171001c1ca22ac"
+      },
+      "reference": {
+        "path": "reference.jats.xml",
+        "sha256": "b10b873f184673d0baa1574b24cc0208a8444e736d87a64e63b05ffb382ce93e"
+      },
+      "format": "JATS",
+      "scope": "Synthetic supported fields only; not a real scientific article",
+      "language": "eng",
+      "category": "synthetic",
+      "annotations": {
+        "path": "annotations.json",
+        "sha256": "5973afc3acdb642952ebc33c43956afb078ec920630b98c9bd34ffc52543af2f"
+      },
+      "review": {
+        "status": "approved",
+        "reviewer": "SYNTHETIC-FIXTURE-AUTHOR",
+        "date": "2026-11-11",
+        "reference_version": "fixture-1",
+        "reference_sha256": "b10b873f184673d0baa1574b24cc0208a8444e736d87a64e63b05ffb382ce93e",
+        "ambiguities": []
+      }
+    },
+    {
+      "id": "synthetic-ani",
+      "pdf": {
+        "path": "synthetic.pdf",
+        "sha256": "fb37b2c7f8e948820a866c6fba5fe5dfdeea01025e9c92ad4a171001c1ca22ac"
+      },
+      "reference": {
+        "path": "reference.ani.xml",
+        "sha256": "c8374191389a8206204fc7d190f2b1901d27dad356127ff157a66f1effae81ef"
+      },
+      "format": "ANI",
+      "scope": "Synthetic supported fields only; not a real scientific article",
+      "language": "eng",
+      "category": "synthetic",
+      "annotations": {
+        "path": "annotations.json",
+        "sha256": "5973afc3acdb642952ebc33c43956afb078ec920630b98c9bd34ffc52543af2f"
+      },
+      "review": {
+        "status": "approved",
+        "reviewer": "SYNTHETIC-FIXTURE-AUTHOR",
+        "date": "2026-11-11",
+        "reference_version": "fixture-1",
+        "reference_sha256": "c8374191389a8206204fc7d190f2b1901d27dad356127ff157a66f1effae81ef",
+        "ambiguities": []
+      }
+    }
+  ]
+}

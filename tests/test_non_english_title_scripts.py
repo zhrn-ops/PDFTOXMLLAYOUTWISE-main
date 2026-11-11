@@ -18,13 +18,14 @@ def session(language='FAS'):
 
 
 @pytest.mark.parametrize('language', ['FAS', 'ARA', 'FRA'])
-def test_generated_non_english_title_has_no_scripts(language):
+def test_generated_non_english_title_preserves_scripts(language):
     document = Document(title='A2B', metadata={'title_language': language,
                         'title_script_runs': [{'start': 1, 'end': 2, 'text': '2', 'type': 'sup'}]})
     root = etree.fromstring(JATSGenerator().to_bytes(document))
     title = root.find('.//{http://www.elsevier.com/xml/ani/ani}titletext')
-    assert title.text == 'A2B'
-    assert len(title) == 0
+    assert ''.join(title.itertext()) == 'A2B'
+    assert title[0].tag == '{http://www.elsevier.com/xml/ani/common}sup'
+    assert title[0].text == '2'
 
 
 def test_existing_title_export_preserves_all_text_and_other_markup():
@@ -32,7 +33,7 @@ def test_existing_title_export_preserves_all_text_and_other_markup():
     root = etree.fromstring(s.xml_bytes())
     title = root.find('.//{http://www.elsevier.com/xml/ani/ani}titletext')
     assert ''.join(title.itertext()) == 'A2 B3 C4 end'
-    assert [etree.QName(child).localname for child in title.iter() if child is not title] == ['italic']
+    assert [etree.QName(child).localname for child in title.iter() if child is not title] == ['sup', 'sub', 'inf', 'italic']
     assert title.get('original') == 'y'
 
 
@@ -41,16 +42,17 @@ def test_english_title_keeps_scripts():
     assert root.find('.//{http://www.elsevier.com/xml/ani/common}sup') is not None
 
 
-def test_formatting_non_english_title_is_rejected_without_changes():
+def test_formatting_non_english_title_preserves_scientific_meaning():
     s = session()
-    before = etree.tostring(s.tree)
-    with pytest.raises(ValueError, match='only for English'):
-        s.apply_script('title', 0, 1, 'sup')
-    assert etree.tostring(s.tree) == before
+    s.set_title('H2O')
+    s.apply_script('title', 1, 2, 'inf')
+    assert ''.join(s.title_node().itertext()) == 'H2O'
+    assert s.title_node()[0].text == '2'
+    assert s._local_name(s.title_node()[0]) == 'inf'
 
 
-def test_changing_english_title_language_removes_scripts():
+def test_changing_english_title_language_preserves_scripts():
     s = session('ENG')
     s.set_title_language('FAS')
-    assert not any(s._local_name(node) in {'sup', 'sub', 'inf'} for node in s.title_node().iter())
+    assert [s._local_name(node) for node in s.title_node().iter()][1:] == ['sup', 'sub', 'inf', 'italic']
     assert ''.join(s.title_node().itertext()) == 'A2 B3 C4 end'

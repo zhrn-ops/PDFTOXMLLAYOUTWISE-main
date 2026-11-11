@@ -1,0 +1,26 @@
+{
+  "contract_version": 1,
+  "corpus_id": "replace-with-corpus-id",
+  "manifest_version": "1",
+  "kind": "reviewed",
+  "coverage_threshold": 0.95,
+  "articles": [
+    {
+      "id": "replace-with-article-id",
+      "pdf": {"path": "pdf/article.pdf", "sha256": "REPLACE_WITH_SHA256"},
+      "reference": {"path": "reference/article.xml", "sha256": "REPLACE_WITH_SHA256"},
+      "format": "JATS",
+      "language": "eng",
+      "category": "two-column",
+      "scope": "Replace with exact reviewed content scope; declare any excluded material",
+      "review": {
+        "status": "draft",
+        "reference_version": "1",
+        "reviewer": "",
+        "date": "",
+        "reference_sha256": "",
+        "ambiguities": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "contract_version": 1,
+  "converter": {
+    "build_id": "REPLACE_WITH_BUILD_ID",
+    "commit": "REPLACE_WITH_COMMIT",
+    "dirty": false
+  },
+  "articles": [
+    {
+      "id": "replace-with-article-id",
+      "format": "ANI",
+      "xml": {"path": "candidate/article.xml", "sha256": "REPLACE_WITH_SHA256"}
+    }
+  ]
+}

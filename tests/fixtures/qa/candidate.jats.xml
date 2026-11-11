@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC DELIBERATELY DAMAGED CANDIDATE. -->
+<article>
+  <front><article-meta>
+    <title-group><article-title>Transport of H2O</article-title></title-group>
+    <contrib-group>
+      <contrib id="a1"><name><surname>Example</surname><given-names>Ada</given-names></name><xref ref-type="aff" rid="f2"/></contrib>
+      <contrib id="a2"><name><surname>Sample</surname><given-names>Ben</given-names></name><xref ref-type="aff" rid="f2"/></contrib>
+    </contrib-group>
+    <aff id="f1">Synthetic Institute A</aff><aff id="f2">Synthetic Institute B</aff>
+    <abstract><p>Flux equals u x 2.</p></abstract>
+  </article-meta></front>
+  <body><sec id="methods"><p>Measure x2 at 20 °C.</p></sec></body>
+</article>

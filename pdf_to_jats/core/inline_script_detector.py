@@ -25,6 +25,16 @@ _PROTECTED_UNITS = re.compile(
 )
 
 
+# Script labels are not always a bare number: author affiliation markers
+# (1,2 / a,b / 1-3), corresponding-author symbols (*, dagger) and charge
+# suffixes (2+) all occur, and rejecting them threw away the geometry that
+# proved they were raised or lowered.
+_SCRIPT_TOKEN = re.compile(
+    r"[0-9A-Za-z*\u2020\u2021\u00a7\u00b6#]+(?:[,\-\u2013\u2014;][0-9A-Za-z*\u2020\u2021\u00a7\u00b6#]+)*[+\-\u2212]?"
+    r"|[+\-\u2212](?:[0-9]+|[*\u2020\u2021\u00a7\u00b6#])"
+)
+
+
 def normalize_inline_runs(
     text: str, runs: Iterable[dict[str, Any]]
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -203,11 +213,21 @@ class InlineScriptDetector:
         reference_size = max(ordinary_sizes, default=max(
             (float(span.get("size", 0.0) or 0.0) for span, _, _ in span_positions), default=0.0
         ))
+        def baseline_of(span: dict[str, Any]) -> float:
+            origin = span.get("origin") or [0.0, (span.get("bbox") or [0, 0, 0, 0])[3]]
+            return float(origin[1])
+
+        # Only body-sized spans may define the baseline. A label that is only
+        # slightly smaller (9.2pt on a 10pt line) used to qualify as "body",
+        # so a one-span line took its raised baseline as the reference and
+        # then matched itself as normal text.
         baselines = [
-            float((span.get("origin") or [0.0, (span.get("bbox") or [0, 0, 0, 0])[3]])[1])
+            baseline_of(span)
             for span, _, _ in span_positions
-            if float(span.get("size", 0.0) or 0.0) >= reference_size * 0.88
+            if float(span.get("size", 0.0) or 0.0) >= reference_size * 0.98
         ]
+        if not baselines:
+            baselines = [baseline_of(span) for span, _, _ in span_positions]
         reference_baseline = sorted(baselines)[len(baselines) // 2] if baselines else 0.0
 
         runs: list[dict[str, Any]] = []
@@ -218,7 +238,7 @@ class InlineScriptDetector:
                 continue
             # Geometry can identify letter scripts too; protected units only
             # allow through spans with a pronounced vertical shift.
-            if not re.fullmatch(r"[\d+\-−]+|[A-Za-z]+", script_text):
+            if not _SCRIPT_TOKEN.fullmatch(script_text):
                 continue
             size = float(span.get("size", 0.0) or 0.0)
             origin = span.get("origin") or [0.0, reference_baseline]
@@ -231,8 +251,15 @@ class InlineScriptDetector:
             if flags & 1:
                 kind = "sup"
                 source = "font_flag"
-            elif size > 0 and size < reference_size * 0.88:
-                threshold = max(0.8, reference_size * 0.12)
+            elif size > 0 and size < reference_size * 0.95:
+                # Publishers do not shrink every script by the same amount; a
+                # 9.2pt label on a 10pt line is still raised. Close-to-body
+                # sizes therefore demand a decisive baseline shift, while a
+                # clear size drop is enough evidence together with a small one.
+                if size < reference_size * 0.88:
+                    threshold = max(0.8, reference_size * 0.12)
+                else:
+                    threshold = max(1.2, reference_size * 0.25)
                 if delta < -threshold:
                     kind = "sup"
                 elif delta > threshold:
@@ -269,7 +296,7 @@ class InlineScriptDetector:
         # ions before the general formula matcher can consume both digits as a
         # single subscript.
         special_ions = re.compile(
-            r"(?<![A-Za-z0-9])(Cr2O7|CrO4|SO4|CO3|PO4)([23])([+\-−])(?![A-Za-z0-9])"
+            r"(?<![A-Za-z0-9])(Cr2O7|CrO4|SO4|CO3|PO4)([23])([+\-−])(?![\u00adA-Za-z0-9])"
         )
         special_ranges = []
         for match in special_ions.finditer(text):
@@ -309,7 +336,10 @@ class InlineScriptDetector:
             add(match.start(1), match.end(1), "sub")
 
         # Compact monatomic charges (Ca2+) and polyatomic charges (SO4-).
-        ion = re.compile(r"(?<![A-Za-z0-9])((?:[A-Z][a-z]?\d*)+)([+\-−])(?![A-Za-z0-9])")
+        # A soft hyphen (U+00AD) after the sign means the PDF broke a
+        # hyphenated word ("TiO2-\u00adenriched"), not an ionic charge, so it
+        # must not satisfy the word boundary.
+        ion = re.compile(r"(?<![A-Za-z0-9])((?:[A-Z][a-z]?\d*)+)([+\-−])(?![\u00adA-Za-z0-9])")
         for match in ion.finditer(text):
             if in_special_range(*match.span()):
                 continue
@@ -324,7 +354,7 @@ class InlineScriptDetector:
                         add(match.start(1) + element.start(2), match.start(1) + element.end(2), "sub")
                 add(match.start(2), match.end(2), "sup")
 
-        simple_ion = re.compile(r"(?<![A-Za-z0-9])([A-Z][a-z]?)([+\-−])(?![A-Za-z0-9])")
+        simple_ion = re.compile(r"(?<![A-Za-z0-9])([A-Z][a-z]?)([+\-−])(?![\u00adA-Za-z0-9])")
         for match in simple_ion.finditer(text):
             if match.group(1) in _ELEMENTS:
                 add(match.start(2), match.end(2), "sup")

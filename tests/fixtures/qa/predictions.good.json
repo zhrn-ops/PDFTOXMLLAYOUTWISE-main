@@ -1,0 +1,26 @@
+{
+  "contract_version": 1,
+  "converter": {
+    "build_id": "synthetic-good",
+    "commit": "synthetic-fixture-not-a-converter",
+    "dirty": false
+  },
+  "articles": [
+    {
+      "id": "synthetic-jats",
+      "format": "JATS",
+      "xml": {
+        "path": "reference.jats.xml",
+        "sha256": "b10b873f184673d0baa1574b24cc0208a8444e736d87a64e63b05ffb382ce93e"
+      }
+    },
+    {
+      "id": "synthetic-ani",
+      "format": "ANI",
+      "xml": {
+        "path": "reference.ani.xml",
+        "sha256": "c8374191389a8206204fc7d190f2b1901d27dad356127ff157a66f1effae81ef"
+      }
+    }
+  ]
+}

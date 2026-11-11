@@ -30,6 +30,11 @@ python pdf_to_jats/main.py
 `run.ps1` and `run.bat` locate a Python interpreter and launch the same entry
 point. `run.ps1` prefers `C:\venvs\p313`; edit it if your environment differs.
 
+OpenRouter credentials are read only from `OPENROUTER_API_KEY`. File-stored
+keys are ignored with a migration warning; remove any old `api_key` entry from
+`output/openrouter_settings.json` after configuring the environment variable.
+Settings saves never write credentials, including through the legacy opt-in.
+
 ## Batch conversion
 
 ```bash
@@ -83,8 +88,16 @@ otherwise. A missing schema is never reported as valid.
 
 - Real-paper extraction/layout accuracy is not measured by the synthetic test
   suite; a reviewed PDF corpus is still needed.
-- The Classify action still performs its model call on the GUI thread (tracked
-  in `docs/audit/05_final_engineering_review.md`).
+- The Classify button has been removed. See
+  `docs/audit/06_remediation.md` for the updated audit status.
 - Country normalization covers ISO names/codes and a curated alias table; it
   now includes UK constituent countries, but genuinely unknown values still
   require review.
+
+## Scientific quality assurance
+
+The independent offline evaluator compares saved XML with approved references,
+reports accuracy and coverage, and compares benchmark runs. See
+[Scientific QA](docs/scientific_qa.md) for corpus review, CLI commands, metric
+definitions, synthetic examples, and limitations. No real reviewed corpus is
+bundled, so the examples make no real-world accuracy claim.

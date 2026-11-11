@@ -1,6 +1,7 @@
 """Regression coverage for asynchronous, session-safe PDF rendering."""
 
 import fitz
+import time
 from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
 
@@ -8,11 +9,12 @@ from pdf_to_jats.gui.pdf_viewer import PDFViewer
 
 
 def _wait_for_render(qapp, viewer: PDFViewer, page_index: int) -> None:
-    loop = QEventLoop()
-    viewer.pageChanged.connect(lambda *_: None)
-    QTimer.singleShot(350, loop.quit)
-    loop.exec()
     key = (str(viewer._pdf_path), page_index, viewer._page_scale)
+    deadline = time.monotonic() + 5
+    while key not in viewer._page_pixmaps and time.monotonic() < deadline:
+        loop = QEventLoop()
+        QTimer.singleShot(20, loop.quit)
+        loop.exec()
     assert key in viewer._page_pixmaps
 
 

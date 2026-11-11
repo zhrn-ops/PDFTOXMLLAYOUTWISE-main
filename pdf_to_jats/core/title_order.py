@@ -43,9 +43,6 @@ def english_titles_first(root):
         positions = [i for i, child in enumerate(children)
                      if isinstance(child.tag, str) and child.tag.rsplit('}', 1)[-1] == 'titletext']
         titles = [children[i] for i in positions]
-        for title in titles:
-            if non_english_title(title.get('{http://www.w3.org/XML/1998/namespace}lang')):
-                remove_title_scripts(title)
         titles.sort(key=lambda node: (node.get('{http://www.w3.org/XML/1998/namespace}lang') or '').strip().upper() != 'ENG')
         for index, title in zip(positions, titles):
             children[index] = title

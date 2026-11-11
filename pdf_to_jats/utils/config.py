@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -39,11 +40,17 @@ def load_config() -> AppConfig:
             settings = json.loads(config.openrouter_settings_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             settings = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        if settings.get("api_key"):
+            logging.getLogger(__name__).warning(
+                "Ignoring deprecated file-stored OpenRouter key. Set OPENROUTER_API_KEY "
+                "and remove api_key from openrouter_settings.json."
+            )
         config.openrouter_model = settings.get("model", config.openrouter_model)
         config.openrouter_fallback_models = settings.get(
             "fallback_models", config.openrouter_fallback_models
         )
-        config.openrouter_api_key = settings.get("api_key", config.openrouter_api_key)
     config.openrouter_model = os.environ.get("OPENROUTER_MODEL", config.openrouter_model)
     config.openrouter_fallback_models = os.environ.get(
         "OPENROUTER_FALLBACK_MODELS", config.openrouter_fallback_models
@@ -55,23 +62,16 @@ def load_config() -> AppConfig:
 def save_openrouter_settings(config: AppConfig, *, include_api_key: bool = False) -> None:
     """Persist non-secret OpenRouter settings for GUI-driven runs.
 
-    The API key is only written when a caller explicitly opts in. Prefer the
-    ``OPENROUTER_API_KEY`` environment variable; a plaintext file key is not
-    written by default.
+    Credentials belong in ``OPENROUTER_API_KEY``. The old keyword is retained
+    to reject legacy callers explicitly instead of silently storing secrets.
     """
 
+    if include_api_key:
+        raise ValueError("Plaintext API-key storage is disabled; use OPENROUTER_API_KEY.")
     config.output_dir.mkdir(parents=True, exist_ok=True)
     settings = {
         "model": config.openrouter_model,
         "fallback_models": config.openrouter_fallback_models,
     }
-    if include_api_key and config.openrouter_api_key:
-        settings["api_key"] = config.openrouter_api_key
     path = config.openrouter_settings_path
     path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    if include_api_key:
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            # Windows ACLs do not map to POSIX modes; the caller opted in.
-            pass

@@ -64,6 +64,7 @@ from pdf_to_jats.core.validator import Validator, ValidationError
 from pdf_to_jats.llm.openrouter_client import OpenRouterClient, OpenRouterRateLimitError
 from pdf_to_jats.llm.ollama_client import OllamaClient
 from pdf_to_jats.llm.primary_client import PrimaryLLMClient
+from pdf_to_jats.llm.errors import LLMError
 from pdf_to_jats.llm.prompts import (
     AUTHOR_AFFILIATION_PROMPT,
     QUESTION_ANSWER_PROMPT,
@@ -459,9 +460,6 @@ class MainWindow(QMainWindow):
         continue_btn = QPushButton("Continue Paragraph")
         continue_btn.setToolTip("Merge selected paragraph units into one continuous paragraph")
         continue_btn.clicked.connect(self.continue_selected_paragraphs)
-        classify_btn = QPushButton("Classify")
-        classify_btn.setToolTip("Classify selected text blocks")
-        classify_btn.clicked.connect(self.classify_selected_blocks)
         unmerge_btn = QPushButton("Undo")
         unmerge_btn.setToolTip("Undo merge")
         unmerge_btn.setAccessibleName("Undo merge")
@@ -482,7 +480,6 @@ class MainWindow(QMainWindow):
         action_buttons = [
             merge_btn,
             continue_btn,
-            classify_btn,
             unmerge_btn,
             redo_btn,
         ]
@@ -2162,7 +2159,7 @@ class MainWindow(QMainWindow):
                     dialog.setRange(0, 1)
                     dialog.setValue(1)
                     dialog.setCancelButtonText("Close")
-        for name in ("finish_article_btn", "classify_btn", "review_parser", "alternate_names_btn"):
+        for name in ("finish_article_btn", "review_parser", "alternate_names_btn"):
             button = getattr(self, name, None)
             if button is not None:
                 button.setEnabled(not busy)
@@ -2249,8 +2246,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'GROBID parsing failed',
                                 f'{error}\n\nNo GROBID draft was generated. Check the service or select Qwen.')
             return
+        if error is not None and not isinstance(error, LLMError):
+            self._log(f"Internal author/affiliation parsing error ({type(error).__name__}); no draft generated.")
+            if not self.headless:
+                QMessageBox.warning(self, "Internal parsing error",
+                                    "An unexpected parsing error occurred. No draft was generated.")
+            return
         if error is not None:
-            self._log(f"Qwen/OpenRouter failed; keeping heuristic author links: {error}")
+            self._log("Qwen/OpenRouter unavailable; keeping heuristic author links for review.")
             response = {}
         else:
             self._log("Author/affiliation model response received; preparing the XML draft.")
@@ -2265,6 +2268,8 @@ class MainWindow(QMainWindow):
             segment_document = self._run_article_finish_step(
                 "Preparing article metadata", prepare_document
             )
+            if error is not None:
+                segment_document.metadata["author_link_source"] = "heuristic"
             segment_key = self._segment_key(segment)
             if parser == 'qwen' and segment_key in getattr(self, "_manual_link_review_segments", set()):
                 reviewed = self._llm_links_by_segment.get(segment_key)
@@ -3084,8 +3089,9 @@ class MainWindow(QMainWindow):
         except OpenRouterRateLimitError as exc:
             self._log(f"Author/affiliation parse rate-limited: {exc}")
             return False
-        except Exception as exc:
-            self._log(f"Author/affiliation parse failed; keeping heuristic links: {exc}")
+        except LLMError as exc:
+            self._log("Author/affiliation provider unavailable; keeping heuristic links for review.")
+            segment_document.metadata["author_link_source"] = "heuristic"
             return False
         if not isinstance(response, dict):
             self._log("Author/affiliation parse returned no JSON; keeping heuristic links.")
@@ -5429,6 +5435,7 @@ class MainWindow(QMainWindow):
             }
 
         answer_summary: object = None
+        classification_source = "llm"
         try:
             answer_summary = self.openrouter_client.classify(
                 prompt=QUESTION_ANSWER_PROMPT,
@@ -5443,10 +5450,12 @@ class MainWindow(QMainWindow):
         except OpenRouterRateLimitError as exc:
             self._log(f"OpenRouter classification rate-limited: {exc}")
             self._log("Falling back to local heuristic classifier for selected blocks.")
+            classification_source = "heuristic"
             raw_response = local_classifier_response()
-        except Exception as exc:
-            self._log(f"OpenRouter classification failed: {exc}")
+        except LLMError as exc:
+            self._log("OpenRouter classification unavailable.")
             self._log("Falling back to local heuristic classifier for selected blocks.")
+            classification_source = "heuristic"
             raw_response = local_classifier_response()
         self._adopt_abstract_number(answer_summary, selected_blocks)
         assignments = self._extract_role_assignments(raw_response)
@@ -5491,6 +5500,7 @@ class MainWindow(QMainWindow):
             previous_role = block.role
             block.role = role
             block.confidence = confidence
+            block.metadata["classification_source"] = classification_source
             if previous_role == "title" and role != "title":
                 self._clear_manual_title_metadata_if_needed(block.id)
             changed.append((block.id, role))

@@ -1,4 +1,5 @@
 import logging
+import pytest
 
 from pdf_to_jats.utils.config import AppConfig, save_openrouter_settings
 from pdf_to_jats.utils.logger import redact_secrets
@@ -21,12 +22,11 @@ def test_settings_do_not_persist_the_key_by_default(tmp_path):
     assert "supersecret" not in text
 
 
-def test_settings_persist_the_key_only_on_explicit_opt_in(tmp_path):
+def test_settings_reject_legacy_plaintext_key_opt_in(tmp_path):
     config = config_for(tmp_path)
-    save_openrouter_settings(config, include_api_key=True)
-    text = config.openrouter_settings_path.read_text(encoding="utf-8")
-    assert "api_key" in text
-    assert "supersecret" in text
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        save_openrouter_settings(config, include_api_key=True)
+    assert not config.openrouter_settings_path.exists()
 
 
 def test_redact_secrets_masks_keys_and_bearer_values():
