@@ -16,6 +16,9 @@ from pdf_to_jats.models.document import Document
     ('Viet Nam', 'VNM'), ('Vietnam', 'VNM'), ('Sri Lanka', 'LKA'),
     ('Côte d’Ivoire', 'CIV'), ('Ivory Coast', 'CIV'), ('Türkiye', 'TUR'),
     ('Bonaire', 'BES'), ('Saba', 'BES'), ('Saint Eustatius', 'BES'),
+    ('England', 'GBR'), ('Scotland', 'GBR'), ('Wales', 'GBR'),
+    ('Northern Ireland', 'GBR'), ('Deutschland', 'DEU'),
+    ('The Netherlands', 'NLD'), ('the netherlands', 'NLD'),
 ])
 def test_aliases_and_codes(value, expected):
     assert country_code(value) == expected
@@ -90,3 +93,17 @@ def test_unresolved_country_is_reported_and_not_saved(tmp_path):
     with pytest.raises(ValueError, match='needs review'):
         s.save_copy(target)
     assert not target.exists()
+
+
+def test_constituent_country_alias_normalizes_in_strict_mode():
+    root = etree.fromstring('<units><affiliation><country>England</country></affiliation></units>')
+    normalize_country_elements(root, strict=True)
+    country = root.find('.//country')
+    assert country.get('iso-code') == 'GBR'
+    assert country.text is None and len(country) == 0
+
+
+def test_leading_the_is_ignored_for_country_names():
+    root = etree.fromstring('<units><affiliation><country>The Netherlands</country></affiliation></units>')
+    normalize_country_elements(root, strict=True)
+    assert root.find('.//country').get('iso-code') == 'NLD'

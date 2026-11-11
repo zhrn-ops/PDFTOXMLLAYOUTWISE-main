@@ -1,8 +1,10 @@
-# Phase 0 — repository baseline
+# Phase 0 — Repository discovery and baseline
 
-Audit snapshot: **2026-11-10 14:45 (Asia/Colombo)**. Scope: discovery, baseline execution, and audit only. No production application logic, dependency, CI, or test source was changed in Phases 0–1.
+Audit snapshot: **2026-11-11 09:00 (SLST)**, commit **`612f395`**, branch `main`, **clean working tree** (`git status --porcelain` returned no entries).
 
-> **Concurrent-change warning.** The working tree changed while this audit was running. `pdf_to_jats/core/title_order.py` and `pdf_to_jats/core/xml_correction.py` were touched at 14:35, and `tests/test_non_english_title_scripts.py` appeared at 14:36. The test count therefore grew from 579 to 586 during the audit. The findings below were re-checked against the 14:45 snapshot; the main finding areas (`main_window.py`, `cli.py`, `pdf_viewer.py`, `article_drafts.py`) were last modified before 11:39 and were not affected. Re-run the baseline before acting on it.
+> **Historical baseline.** This file records the pre-remediation state. Later approved phases changed source, tests, CI, and packaging; the final state and all deltas are in `05_final_engineering_review.md`.
+
+Scope: discovery, baseline execution, and audit only. **No production application logic, test source, dependency, schema, or CI file was changed.** This report supersedes the 2026-11-10 14:45 snapshot, which was taken while the tree contained uncommitted Phase 2/3 and bilingual-author work. That work is now committed, and the previously red baseline is green.
 
 ## Environment
 
@@ -10,109 +12,103 @@ Audit snapshot: **2026-11-10 14:45 (Asia/Colombo)**. Scope: discovery, baseline 
 |---|---|
 | OS / shell | Windows, Git Bash |
 | Interpreter | `C:\Python314\python.exe`, Python **3.14.2** (win32, 64-bit) |
-| Qt | PySide6 **6.11.1**, Qt runtime 6.11.1 |
+| Qt | PySide6 **6.11.1** (Qt runtime 6.11.1) |
 | PDF | PyMuPDF **1.27.2.3** |
 | XML | lxml **6.0.2** |
 | Optional structure | Docling **2.144.0** |
 | Tests | pytest **9.0.3**, pytest-qt **4.5.0**, pluggy 1.6.0 |
+| `pytest-timeout` | **Not installed** |
 | Headless Qt | `QT_QPA_PLATFORM=offscreen` |
-| Dependency consistency | `python -m pip check` → **No broken requirements found** (not a vulnerability scan) |
-| Authoritative publisher schema | **Not present.** `pdf_to_jats/schemas/jats_1_4.xsd` (the legacy default in `core/validator.py`) does not exist, and no ANI/CAR XSD bundle is installed. |
+| Dependency consistency | `python -m pip check` → **No broken requirements found** (consistency check only, not a CVE scan) |
+| Authoritative publisher schema | **Not present.** No `.xsd` exists under `pdf_to_jats/`; `pdf_to_jats/schemas/jats_1_4.xsd`, the legacy default in `core/validator.py`, does not exist. |
 
-No environment installation was needed. No live GROBID, Ollama, or OpenRouter call was intentionally made. The autouse `deny_external_network` fixture in `tests/conftest.py` blocks non-loopback `socket.connect`, so the executed suite did not deliberately reach public services.
+No environment installation was required. No live GROBID, Ollama, or OpenRouter call was made. The autouse `deny_external_network` fixture in `tests/conftest.py` blocks non-loopback `socket.connect`, so the executed suite could not deliberately reach public services.
 
 ## Repository inventory
 
-- **55 Python source modules** under `pdf_to_jats/`.
-- **50 test modules** under `tests/`, **586 tests collected** at the 14:45 snapshot.
-- Entry points: `pdf_to_jats/main.py:main` (desktop); `pdf_to_jats/cli.py:main` (batch). `run.ps1` / `run.bat` select an interpreter; `run.ps1` prefers `C:\venvs\p313\...`, which does not exist on this machine.
-- Domain models: `models/document.py`, `block.py`, `paragraph.py`, `author.py`, `affiliation.py`, `segmentation.py`.
-- PDF/layout: `core/pdf_extractor.py`, `layout_analyzer.py`, `paragraph_reconstructor.py`, `block_merger.py`, `block_resize.py`, `inline_script_detector.py`, `rtl_text.py`.
-- Classification/linking: `core/semantic_classifier.py`, `auto_refiner.py`, `author_linker.py`, `parenthesized_authors.py`, `alternate_names.py`, `grobid_client.py`.
-- XML: `core/jats_generator.py` (emits **Elsevier ANI/CAR**, despite the `pdf_to_jats` package name), `validator.py`, `xml_validation.py`, `xml_correction.py`, `xml_revisions.py`, `draft_workspace.py`, `atomic_io.py`.
-- GUI: `gui/main_window.py` (about 7,553 lines and the orchestration owner), `pdf_viewer.py`, `xml_correction_window.py`, `xml_code_editor.py`, `article_drafts.py`, `properties_panel.py`, `structure_tree.py`, `styles.py`, `grammar_review.py`, `alternate_names_dialog.py`.
-- LLM/infrastructure: `llm/primary_client.py` (local Ollama first, OpenRouter fallback), `ollama_client.py`, `openrouter_client.py`, `prompts.py`, `utils/config.py`, `utils/logger.py`.
+- **55 Python source modules** under `pdf_to_jats/`; **20,821 LOC**.
+- **50 test modules** under `tests/`; **590 tests collected**; **10,196 LOC**.
+- **2,935 tracked files** total.
 
-### Working tree at the snapshot
+Entry points and modules:
 
-`git status --short` (excluding bytecode) showed pre-existing changes, not made by this audit:
+| Area | Files |
+|---|---|
+| Desktop entry | `pdf_to_jats/main.py:main` |
+| Batch entry | `pdf_to_jats/cli.py:main` (`Converter`, headless `MainWindow`) |
+| Domain models | `models/document.py`, `block.py`, `paragraph.py`, `author.py`, `affiliation.py`, `segmentation.py` |
+| PDF / layout | `core/pdf_extractor.py`, `layout_analyzer.py`, `paragraph_reconstructor.py`, `block_merger.py`, `block_resize.py`, `inline_script_detector.py`, `rtl_text.py`, `language.py` |
+| Classification / linking | `core/semantic_classifier.py`, `auto_refiner.py`, `author_linker.py`, `parenthesized_authors.py`, `alternate_names.py`, `country_codes.py`, `grobid_client.py` |
+| XML | `core/jats_generator.py` (emits **Elsevier ANI/CAR**, despite the package name), `validator.py`, `xml_validation.py`, `xml_correction.py`, `xml_revisions.py`, `draft_workspace.py`, `atomic_io.py`, `title_order.py` |
+| GUI | `gui/main_window.py` (**7,617 lines**), `xml_correction_window.py` (1,970), `pdf_viewer.py` (1,200), `article_drafts.py`, `properties_panel.py`, `structure_tree.py`, `styles.py`, `grammar_review.py`, `alternate_names_dialog.py`, `xml_code_editor.py` |
+| LLM / infrastructure | `llm/primary_client.py` (local Ollama first, OpenRouter fallback), `ollama_client.py`, `openrouter_client.py`, `prompts.py`, `utils/config.py`, `utils/logger.py` |
 
-- Modified: `core/author_linker.py`, `core/jats_generator.py`, `core/xml_correction.py`, `gui/main_window.py`, `gui/xml_correction_window.py`, `models/author.py`, and four existing tests.
-- Untracked: `core/alternate_names.py`, `core/country_codes.py`, `core/country_codes.json`, `core/title_order.py`, `gui/alternate_names_dialog.py`, `tests/test_author_edit_sync.py`, `tests/test_country_codes.py`, `tests/test_manual_alternate_names.py`, `tests/test_non_english_title_scripts.py`.
+Largest modules: `main_window.py` 7,617; `xml_correction_window.py` 1,970; `core/xml_correction.py` 1,662; `core/author_linker.py` 1,493; `core/pdf_viewer` 1,200.
 
-These changes implement bilingual/alternate author names, title-language ordering, country-code normalization, and additional tests. They were **not** part of this audit and were not modified. The existing `docs/audit/phase_02_implementation.md` and `phase_03_implementation.md` describe earlier work already present in this tree; this report supersedes the stale 2026-11-09 baseline and audit documents.
+### Working tree and history
 
-Repository hygiene measured at the snapshot:
+- `main` is 14 commits ahead of the first commit, tracking `origin/main`.
+- The last commit (`612f395`) committed the bilingual/alternate-name/country/title-language feature set and **also committed its `.pyc` files** and refreshed audit documents.
+- No uncommitted changes existed before the audit; none were introduced by it.
 
-- **2,907 tracked files**, including **218 tracked `.pyc`** and **2,565 tracked `node_modules/` files**.
-- No root `README.md`, `pyproject.toml`, `.github/workflows/`, or test-dependency declaration.
-- `.gitignore` contains only `output/` and two duplicate `.env` lines.
-- No authoritative `.xsd` file exists anywhere under `pdf_to_jats/`.
+### Repository hygiene measured at the snapshot
+
+- **237 tracked `.pyc` files** (including bytecode for modules under `pdf_to_jats/` and `tests/`).
+- **2,565 tracked `node_modules/` files** from a JavaScript `@openrouter/sdk` dependency. The Python application does not import it; it is a separate Node dependency (`package.json`).
+- `.bench/big.pdf` (320 KB) is tracked.
+- `.gitignore` contains only `output/` and two duplicate `.env` lines. Bytecode, caches, `node_modules/`, and `.bench/` are not ignored.
+- **No root `README.md`**, **no `pyproject.toml`**, **no `.github/workflows/`**, and no declared test-dependency set or lockfile.
+- An empty leftover directory `.test-alt-review-20261110/` exists at the root and is untracked/empty.
 
 ## State lifecycle map (as implemented)
 
-1. `MainWindow._load_pdf_path` starts `_PdfLoadWorker` on a `QThread` (or runs it directly when `wait=True`). Extraction, classification, and auto-refinement run off the GUI thread. A `_document_generation` counter rejects stale load callbacks.
-2. `_on_pdf_load_complete` installs the `Document`, viewer payload, page sizes, and optional first-page raster, then resets article workflow state. **On a load error it logs and shows a modal box but does not clear the previous document** (see finding C01).
-3. Manual role assignment, article boundaries, and accepted paragraph operations mutate `Document` blocks and metadata. Legacy detector segments remain supported; the current startup flow requires an explicit article number before export.
+1. `MainWindow._load_pdf_path` runs `_PdfLoadWorker` on a `QThread` (or directly when `wait=True`, using `Qt.DirectConnection`). Extraction, classification, and auto-refinement run off the GUI thread. `_document_generation` rejects stale callbacks; the synchronous path returns `_last_load_error`.
+2. `_on_pdf_load_complete` installs the `Document`, viewer payload, page sizes, and preview, then resets article workflow state. **On failure it calls `_clear_document_after_load_failure`, which sets `document = None`, clears paths, selections, drafts, and article state; the modal `QMessageBox.critical` is shown only when `headless` is false.**
+3. Manual role assignment, article boundaries, and accepted paragraph operations mutate `Document` blocks and metadata. The current startup flow clears extractor-derived article segments and requires an explicit article number, except that an unsegmented PDF is exported as one article.
 4. Finish Article runs LLM/GROBID enrichment on `_ArticleFinishWorker`; completion is generation-checked. XML is generated in memory and opened in `XmlCorrectionWindow`; reviewed blocks are locked.
-5. Corrections live in a separate `XmlDocumentSession`, not in `Document`. Raw parse failures keep the last valid tree, mark `raw_valid=False`, and block export. Structured edits invalidate the prior issue list.
+5. Corrections live in a separate `XmlDocumentSession`, not in `Document`. Raw parse failures keep the last valid tree, mark `raw_valid=False`, and block export. Structured edits invalidate the prior issue list. Validation carries exact-byte fingerprints.
 6. `ArticleDrafts` retains XML, raw editor text, PDF/source paths, dirty state, history, revision snapshots, and last validation/export provenance in `.jatsdraft` JSON. Activation reconstructs a session from revision bytes; portable validation is provenance only and never grants a fresh result.
 7. Reopening an article unlocks blocks without deleting its XML draft. Regeneration compares against `generated_xml`; corrected drafts require a review decision. Rejection retains `pending_generated`; acceptance archives the previous draft.
-8. Draft Export and Validated Export are distinct in the correction UI. Validated export requires a selected local schema profile; missing/invalid schema resources block it. Legacy `run_auto_pipeline` and `_export_article_xml` remain draft-oriented and report publisher incompleteness.
-9. Workspace reopening validates records through `stage_workspace` before replacing live state; conversion undo history is cleared. Closing prompts to save/discard/cancel when the workspace comparison says there are changes.
+8. Draft Export and Validated Export are distinct. Validated export requires a selected local schema profile; missing/invalid schema resources block it. Legacy `run_auto_pipeline` and `_export_article_xml` remain draft-oriented and log that publisher validation is incomplete.
+9. Workspace reopening validates records before replacing live state; conversion undo history is cleared. `workspace_is_clean()` treats a programmatically loaded document with no drafts/session as clean, so a mere load does not prompt. In headless mode `confirm_close_drafts` refuses rather than showing a modal.
+10. `PDFViewer.cleanup` waits up to 5 s per raster thread, logs a timeout, and **keeps ownership** of a thread that did not stop instead of clearing it.
 
 ## Executed baseline
 
-| Command / variant | Result |
+All commands were run from the project root with `QT_QPA_PLATFORM=offscreen`.
+
+| Command | Result |
 |---|---|
-| `python -m compileall -q pdf_to_jats tests` | **Exit 0**, no syntax errors printed |
-| `python -m pytest -q` (default discovery) | **Never returned**; terminated by the audit's 600 s command timeout |
-| `python -m pytest -q tests` (offscreen, cache disabled) | **Hangs** in `test_cli_workflow.py` and `test_process_lifecycle.py` (details below) |
-| Full suite, three blocking tests deselected | **580 passed, 3 failed, 3 deselected in 27.49 s** (586 collected) |
-| CLI + lifecycle files with an audit-only `QMessageBox` stub | **4 passed, 3 failed in 2.48 s**; the three blocked tests split into two passes and one failure (`converter` zero-output), and the non-blocked `test_cli_main_exit_codes` also failed |
-| `python -m pip check` | No broken requirements |
+| `python -m compileall -q pdf_to_jats tests` | **Exit 0**; no syntax errors |
+| `python -m pip check` | **No broken requirements found** |
+| `python -m pytest --collect-only -q -p no:cacheprovider` | **590 tests collected in 3.57 s** |
+| `timeout 300 python -m pytest -q -p no:cacheprovider -o faulthandler_timeout=45` | **590 passed in 20.86 s**, exit 0 |
+| Repeat `-rsxX` run | **590 passed in 21.99 s**; no skips, xfails, or collection errors |
 
-The standard suite is **not a passing run**. The three deselected tests block on real modal dialogs, and two of the three failures are caused by stale test code. The audit-only `QMessageBox` stub was used solely to expose the behavior underneath; it is not a test change and is not part of the repository.
+The suite now terminates normally. The 2026-11-10 report recorded three modal-blocked tests, two stale-API failures, and one CLI zero-output failure; **all six now pass** in a non-deselected run without any dialog stub or audit-only test modification.
 
-### Failures and blocked tests
+### Warnings and import failures
 
-| Test | Status | Evidence |
-|---|---|---|
-| `tests/test_golden_structural.py::test_golden_scientific_document_structure` | **Failed** | `TypeError: Paragraph.__init__() missing 1 required positional argument: 'bbox'` at test line 69. `Paragraph` has required `bbox`; the test constructs it without one. |
-| `tests/test_process_lifecycle.py::test_viewer_cleanup_cancels_in_flight_raster_threads` | **Failed** | `AttributeError: 'PDFViewer' object has no attribute 'set_visible_range'` at test line 66. The viewer exposes `_render_visible_pages` / `render_page`, not this method; `git log -S` shows the test introduced the name but no production implementation. |
-| `tests/test_cli_workflow.py::test_cli_main_exit_codes` | **Failed** | `main([...])` returns 0, then `out_dir.glob("*.xml")` is empty. stdout: `[OK] sample_paper.pdf \| 7 blocks \| no review flags \| 0 XML file(s)`. |
-| `tests/test_cli_workflow.py::test_cli_converter_end_to_end` | **Blocked by modal close** | Under a dialog stub: `assert len(written) >= 1` fails with `0`. Without the stub: hangs in `converter.window.close()` → `article_drafts.py:163 confirm_close_drafts`. |
-| `tests/test_cli_workflow.py::test_load_pdf_path_wait_parameter_completes_extraction` | **Blocked by modal close** | Faulthandler stack ends at `article_drafts.py:163 confirm_close_drafts` called by `main_window.py:259 closeEvent`. Under a dialog stub the assertions pass, so the prior `wait=True` `TypeError` is fixed, but the test still hangs in normal runs. |
-| `tests/test_process_lifecycle.py::test_article_finish_drops_stale_response_on_generation_mismatch` | **Blocked by modal close** | Same `closeEvent` → `confirm_close_drafts` stack at test line 102. Under a dialog stub the stale-generation assertions pass. |
+- Compilation and collection produced no warnings, import failures, or missing dependencies.
+- `pytest.ini` filters `DeprecationWarning` and `PendingDeprecationWarning`, so deprecation output would be suppressed even if present. This was not changed.
 
-### Baseline probes (synthetic, no real documents or secrets)
+## Reconciliation with the previous baseline
 
-| Probe | Observed | Finding |
-|---|---|---|
-| Load a minimal valid PDF, then close without editing | `document_loaded True`, `session False`, `prompt_calls ['Save article drafts?']` | C02 |
-| Load a valid PDF, then load a second valid PDF | First load: 0 prompts; second load: 1 prompt (`Save article drafts?`) | C02; batch CLI hangs on the second input |
-| Load a valid PDF, then a corrupt `.pdf` | `document is None? False`; stale `source_pdf` remains the first PDF; `QMessageBox.critical('PDF Load Error')` called | C01, C03 |
-| Run the CLI `Converter` on a simple PDF with no manual article start | No exception; `0 XML file(s)`; `main` returns 0 | C04 |
-| Read `PDFViewer.cleanup` | `thread.wait(200)` return ignored; thread/worker maps cleared regardless | C05 (static; crash not reproduced) |
-| Inspect structural comparator | `.strip()` on text/tails; comments/PIs not compared as content | C07 |
-
-No actual API key was read or written. No real source XML was overwritten. All probe files were created under a temporary directory inside `.audit_tmp/` and are removed before hand-off.
-
-## Phase 2/3 work already present in this tree
-
-The earlier phases are already implemented in the working tree (uncommitted). This audit did not re-report them as open defects:
-
-- Structured `WELL_FORMED` / `NOT_WELL_FORMED` / `SCHEMA_VALID` / `SCHEMA_INVALID` / `SCHEMA_UNAVAILABLE` results in `core/xml_validation.py`; explicit draft vs validated export; local schema-bundle path containment; secure parsers.
-- Atomic publication in `core/atomic_io.py` and exact-byte revision fingerprints in `core/xml_revisions.py`.
-- Inline mixed-content serialization that leaves `H<sub>2</sub>O` and adjacent `italic` tails intact.
-- ISO-8859-1/UTF-16 Unicode boundaries; alphabetic/Greek script preservation.
-- 36 `tests/test_xml_validation_export.py` cases and 15 `tests/test_xml_revision_integrity.py` cases all passed in the terminating run.
-
-Remaining limitations are documented in `01_code_audit.md`. The absence of an authoritative ANI/CAR schema means this checkout still cannot make a publisher-valid claim; the code now reports that truthfully instead of treating missing schema as success.
+| Previous item | Current status |
+|---|---|
+| 586 tests; three hangs; 3 failures | **590 tests, 0 failures, 0 hangs** |
+| C01 failed load retained the previous document | **Fixed** — transactional clear; covered by `test_failed_load_clears_previous_document` |
+| C02 loaded-but-unedited PDF prompted to save | **Fixed** — `workspace_is_clean`/`mark_workspace_clean` and headless refusal; covered by `test_batch_two_pdfs_does_not_prompt_or_reuse_document` |
+| C03 corrupt PDF opened a modal in headless runs | **Fixed** — dialog gated by `self.headless`; covered by `test_cli_corrupt_pdf_returns_nonzero_without_dialog` |
+| C04 CLI reported success with zero XML | **Fixed** — `Converter.convert` raises when no file is written; covered by `test_converter_rejects_zero_output` |
+| C05 cleanup ignored a failed thread wait | **Fixed** — 5 s verified wait, ownership retained on timeout; covered by `test_viewer_cleanup_cancels_in_flight_raster_threads` |
+| C06 stale test APIs | **Fixed** — the tests now use the real model/viewer APIs and pass |
+| Prior audit documents described a red baseline | **Stale**; replaced by this report and refreshed `01`–`03` |
 
 ## Baseline conclusion
 
-- No **P0** defect was confirmed.
-- The most serious current issues are not in the XML core; they are in the **headless conversion contract** (stale document on failed load, modal dialogs during batch/close, zero-output success) and in **test infrastructure** (three hangs, two stale-API failures, no CI/timeout).
-- The prior XML validation/revision work is present and its focused tests pass. It should be reviewed and committed before further changes.
-- No performance benchmark, vulnerability scan, live-service test, or publisher-schema validation was executed. No production-readiness certification is claimed.
+- **No P0 defect is open.** The four P1 release blockers from the previous audit are fixed and covered by regression tests.
+- The remaining open findings are engineering and fidelity issues, not data-corruption blockers: schema/scientific-accuracy readiness, test-build hygiene, a GUI-thread LLM call, broad exception handling, and two newly confirmed content-normalization concerns (see `01_code_audit.md`).
+- The XML core (structured validation statuses, atomic publication, revision fingerprints, secure parsing, mixed-content preservation) is present and its focused tests pass.
+- **No claim of publisher schema validity is made.** No authoritative ANI/CAR schema is bundled, so validated export depends on a user-supplied local profile.
+- Not measured in this phase: real scientific-PDF extraction accuracy, performance/memory benchmarks, dependency CVEs, live-service behavior, or schema validation against an authoritative publisher schema.

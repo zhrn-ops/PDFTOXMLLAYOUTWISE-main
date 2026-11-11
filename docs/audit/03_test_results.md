@@ -1,84 +1,108 @@
-# Test results — Phase 0 baseline snapshot
+# Test results — Phase 0/1 baseline
 
-Snapshot: **2026-11-10 14:45**. These are executed results for the current working tree, not projected results. The tree changed during the audit (concurrent title/alternate-name edits at 14:35–14:36); the test count grew from 579 to 586. No test source was modified by this audit. An audit-only `QMessageBox` stub under `.audit_tmp/` was used to expose behavior underneath modal dialogs; it is not part of the repository.
+Snapshot: **2026-11-11 09:00 (SLST)**, commit **`612f395`**, clean tree. These are executed results for the current source, not projected results. No production or test source was modified during this audit.
 
 ## Commands and outcomes
 
 | Command | Result |
 |---|---|
-| `python -m compileall -q pdf_to_jats tests` | Exit **0**; no syntax errors |
-| `python -m pip check` | No broken requirements |
-| `python -m pytest tests -q --collect-only` | **586 tests collected** |
-| `QT_QPA_PLATFORM=offscreen python -m pytest -q tests -p no:cacheprovider` | **Did not terminate** (three modal-blocked tests) |
-| Same, with the three blocking tests deselected | **580 passed, 3 failed, 3 deselected in 27.49 s** |
-| `tests/test_cli_workflow.py` + `tests/test_process_lifecycle.py` with the audit `QMessageBox` stub | **4 passed, 3 failed in 2.48 s** |
+| `python -m compileall -q pdf_to_jats tests` | **Exit 0**; no syntax errors |
+| `python -m pip check` | **No broken requirements found** |
+| `QT_QPA_PLATFORM=offscreen python -m pytest --collect-only -q -p no:cacheprovider` | **590 tests collected in 3.57 s** |
+| `QT_QPA_PLATFORM=offscreen timeout 300 python -m pytest -q -p no:cacheprovider -o faulthandler_timeout=45` | **590 passed in 20.86 s**, exit 0 |
+| `QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider -rsxX` | **590 passed in 21.99 s**; no skips, xfails, or collection errors |
 
-The standard suite is **not green**. The three failures are real for this snapshot; two are stale test code, one is a CLI contract defect.
+The suite terminates normally without deselection, dialog stubs, or audit-only fixtures. `faulthandler_timeout` was used only to surface a stall if one occurred; no test exceeded it.
 
-## Failures
+Coverage of the previously open P1 findings (all committed in `tests/`):
 
-### 1. Golden structural test — stale model fixture
-
-```
-tests/test_golden_structural.py::test_golden_scientific_document_structure
-TypeError: Paragraph.__init__() missing 1 required positional argument: 'bbox'
-tests/test_golden_structural.py:69
-```
-
-`Paragraph.bbox` is a required field (`pdf_to_jats/models/paragraph.py:16`); the fixture omits it. Test defect, not a production defect (C06).
-
-### 2. Viewer cleanup test — nonexistent API
-
-```
-tests/test_process_lifecycle.py::test_viewer_cleanup_cancels_in_flight_raster_threads
-AttributeError: 'PDFViewer' object has no attribute 'set_visible_range'
-tests/test_process_lifecycle.py:66
-```
-
-`PDFViewer` never exposed `set_visible_range`; the name appears only in the test commit. The test therefore provides no coverage for `PDFViewer.cleanup` (C05/C06).
-
-### 3. CLI exit code — success with zero output
-
-```
-tests/test_cli_workflow.py::test_cli_main_exit_codes
-AssertionError: main(...) returned 0; out_dir.glob('*.xml') is empty
-stdout: [OK] sample_paper.pdf | 7 blocks | no review flags | 0 XML file(s)
-```
-
-`tests/test_cli_workflow.py::test_cli_converter_end_to_end` fails the same way (`0` written files) when the modal close is stubbed. Root cause: `run_auto_pipeline` returns silently when no article is started, and `Converter.convert` checks only for a non-`None` document (C04).
-
-## Modal-blocked tests (hang)
-
-| Test | Faulthandler endpoint | Under `QMessageBox` stub |
+| Finding | Regression test | Status |
 |---|---|---|
-| `test_cli_workflow.py::test_load_pdf_path_wait_parameter_completes_extraction` | `article_drafts.py:163 confirm_close_drafts` ← `main_window.py:259 closeEvent` | **Passed** — the prior `wait=True` `TypeError` is fixed; only the close prompt hangs |
-| `test_cli_workflow.py::test_cli_converter_end_to_end` | Same close path | **Failed** on the zero-output assertion (C04) |
-| `test_process_lifecycle.py::test_article_finish_drops_stale_response_on_generation_mismatch` | Same close path | **Passed** — stale-generation rejection works |
+| C01 | `test_cli_workflow.py::test_failed_load_clears_previous_document`, `::test_batch_two_pdfs_does_not_prompt_or_reuse_document` | Passed |
+| C02 | `test_cli_workflow.py::test_batch_two_pdfs_does_not_prompt_or_reuse_document`, the previously hanging load/lifecycle tests | Passed |
+| C03 | `test_cli_workflow.py::test_cli_corrupt_pdf_returns_nonzero_without_dialog` | Passed |
+| C04 | `test_cli_workflow.py::test_cli_converter_end_to_end`, `::test_cli_main_exit_codes`, `::test_converter_rejects_zero_output` | Passed |
+| C05 | `test_process_lifecycle.py::test_viewer_cleanup_cancels_in_flight_raster_threads` | Passed |
+| C06 | `test_golden_structural.py`, `test_process_lifecycle.py` | Passed |
 
-Root cause: a freshly loaded PDF is treated as unsaved work (`_saved_workspace` is `None`), so `closeEvent` and opening a second PDF prompt modally (C02).
+## Audit probes (executed, not part of the suite)
 
-## Audit probes
+These probes used the project modules directly; they created no repository files.
 
-| Probe | Result |
+### Structural comparator (C07)
+
+| Mutation | Comparator result |
 |---|---|
-| Load valid PDF, then close | `document_loaded True`, `session False`, prompt `['Save article drafts?']` |
-| Load valid PDF, then second valid PDF | First: 0 prompts; second: 1 prompt |
-| Load valid PDF, then corrupt PDF | `document is None? False`; stale source remains; `QMessageBox.critical('PDF Load Error')` called |
-| CLI `Converter` on a simple PDF, no manual article start | No exception; `0 XML file(s)`; `main(...) == 0` |
-| `PDFViewer.cleanup` inspection | `thread.wait(200)` result ignored; thread maps cleared unconditionally (static) |
+| Leading space changed (`text` vs ` text`) | **Passed** (difference not detected) |
+| Tail whitespace `"  "` → `""` | **Passed** (difference not detected) |
+| Internal double space (`a b` → `a  b`) | Rejected |
+| Comment added | Rejected (child count/tag mismatch) |
+| Processing instruction added | Rejected (child count/tag mismatch) |
 
-No real API key was read or written; no live network service was contacted (the test fixture denies external sockets); no real document was overwritten. Probe files were synthetic and confined to `.audit_tmp/`.
+This narrows C07 to whitespace normalization. The previous report’s claim that comments/PIs are not compared was incorrect.
+
+### Non-English title script removal (N01)
+
+| Input | Result |
+|---|---|
+| `A<sup>2</sup>B<sub>3</sub>C` | Text preserved; serialized as `A2B3C` |
+| `<sup>2</sup>H<sub>2</sub>O water` | Text preserved; serialized as `2H2O water` |
+| `A<sup>x<sup>y</sup>z</sup>B` | Text preserved; serialized as `AxyzB` |
+| `A<sup><italic>q</italic>r</sup>B` | Text preserved; `italic` retained, `sup` removed |
+
+No text loss was found; the loss is markup/semantics (`sup`, `sub`, `inf`).
+
+### Country normalization (N02)
+
+| Value | `country_code` |
+|---|---|
+| `United States`, `USA`, `U.S.A.` | `USA` |
+| `Germany` | `DEU` |
+| `South Korea`, `Korea, Republic of` | `KOR` |
+| `Iran`, `Türkiye`, `Russia`, `Netherlands` | `IRN`, `TUR`, `RUS`, `NLD` |
+| `England`, `Scotland`, `Wales`, `Northern Ireland` | `''` |
+| `Deutschland`, `The Netherlands` | `''` |
+
+With `strict=True`, `<country>England</country>` raises `ValueError: Country 'England' needs review: select a valid three-letter country code.`; `Germany` normalizes to `iso-code="DEU"` and removes the text.
+
+### Dead code (N03)
+
+`grep` over `pdf_to_jats/gui/*.py` finds `_auto_classify` only at its definition (`main_window.py:789`) and one log string inside it. The only classification connection is `classify_btn.clicked.connect(self.classify_selected_blocks)` at line 464.
 
 ## Passing areas (executed)
 
-- `tests/test_xml_validation_export.py` — **36 passed** (structured well-formed/schema/unavailable results, draft vs validated export, schema-path containment).
-- `tests/test_xml_revision_integrity.py` — **15 passed** (exact-byte revisions, atomic/no-clobber publication).
-- Comment/PI/unknown-node preservation, inline mixed-content serialization, non-UTF-8 decoding, draft/session, author/affiliation, and country/alternate-name tests all passed in the terminating run.
+- `test_xml_validation_export.py` — structured well-formed/schema/unavailable results, draft vs validated export, schema-path containment, atomic-write failure preservation, mixed-content serialization, non-UTF-8 decoding.
+- `test_xml_revision_integrity.py` — exact-byte revisions, atomic/no-clobber publication.
+- `test_article_drafts.py` — regeneration/reconciliation, save/reopen, workspace round-trip, cancel preserves draft.
+- `test_author_edit_sync.py`, `test_bilingual_authors.py`, `test_manual_alternate_names.py`, `test_country_codes.py`, `test_non_english_title_scripts.py` — newly committed feature coverage.
+- `test_article_workflow.py`, `test_segmentation.py`, `test_marker_workflow.py` — article partition, deletion, finish, export scoping.
+- `test_pdf_viewer_loading.py`, `test_process_lifecycle.py` — on-demand rendering, bounded cache, stale-result rejection, cleanup.
 - All 50 test modules import; no collection errors.
 
 ## Limitations
 
-- No performance benchmark, vulnerability scan, live-service test, or real-publisher-schema validation was run.
-- No real scientific PDF corpus was used, so extraction/layout accuracy is not measured.
-- The full suite cannot be executed end-to-end without either deselecting the modal-blocked tests or supplying a dialog stub; the standard result is “does not terminate”.
-- The working tree changed during the audit; re-run before acting. No production-readiness or schema-validity certification is claimed.
+- No performance benchmark, memory measurement, vulnerability scan, live-service test, or real-publisher-schema validation was run.
+- No real scientific PDF corpus was used; extraction/layout accuracy on real papers is not measured (R01).
+- The full suite runs headless (`QT_QPA_PLATFORM=offscreen`); it does not prove visual/interaction correctness in a displayed window.
+- `pytest.ini` filters deprecation warnings, so suppressed warnings would not appear in this output.
+- `docs/audit/dependency_versions.txt` is a dated environment inventory, not a lockfile or CVE result.
+- No production-readiness or schema-validity certification is claimed.
+
+---
+
+## Final post-remediation results
+
+After the approved remediation changes (country aliases, exact comparator, dead-code removal, secret/log hardening, test timeout), the full suite was re-run:
+
+| Command | Result |
+|---|---|
+| `python -m compileall -q pdf_to_jats tests` | Exit 0 |
+| `QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider` | **609 passed in 20.66 s**, exit 0 |
+| `tests/test_golden_structural.py` | 8 passed |
+| `tests/test_country_codes.py` | 38 passed |
+| `tests/test_secret_handling.py` | 4 passed |
+| `tests/test_xml_validation_export.py` + `tests/test_xml_revision_integrity.py` | 51 passed |
+
+**19 tests were added** (590 → 609): 6 comparator strictness/mutation tests, 9 country alias/strict-mode cases, and 4 secret-handling/redaction tests. No test was skipped, weakened, or deleted.
+
+CI (`.github/workflows/tests.yml`) runs the same suite headless on Windows with a 180-second per-test timeout and a 20-minute job cap. Docling is intentionally omitted there, so CI exercises the documented PyMuPDF-only fallback.

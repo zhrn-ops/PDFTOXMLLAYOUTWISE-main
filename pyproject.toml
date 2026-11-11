@@ -1,0 +1,25 @@
+[project]
+name = "pdf-to-jats"
+version = "0.1.0"
+description = "Desktop and batch conversion of scientific PDFs into Elsevier ANI/CAR XML"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6,<7",
+    "PyMuPDF>=1.24,<2",
+    "lxml>=5,<7",
+]
+
+[project.optional-dependencies]
+# Docling is an optional structural-enrichment backend. The extractor falls
+# back to PyMuPDF alone when it is not installed.
+docling = ["docling>=2.115,<3"]
+test = [
+    "pytest>=9,<10",
+    "pytest-qt>=4.5,<5",
+    "pytest-timeout>=2.3,<3",
+]
+
+[tool.pytest.ini_options]
+# pytest.ini remains authoritative for markers and warning filters. Keep the
+# per-test timeout here in sync with it.
+timeout = 180

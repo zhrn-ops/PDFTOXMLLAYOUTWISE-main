@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install runtime and test dependencies
+        # Docling is intentionally omitted: CI exercises the documented
+        # PyMuPDF-only fallback instead of downloading large model packages.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "PySide6>=6.6,<7" "PyMuPDF>=1.24,<2" "lxml>=5,<7"
+          python -m pip install "pytest>=9,<10" "pytest-qt>=4.5,<5" "pytest-timeout>=2.3,<3"
+      - name: Compile
+        run: python -m compileall -q pdf_to_jats tests
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q

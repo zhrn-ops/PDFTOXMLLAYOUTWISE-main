@@ -26,12 +26,23 @@ CE_NS = JATSGenerator.CE_NS
 
 
 def assert_structural_equality(node_a: etree._Element, node_b: etree._Element) -> None:
-    """Recursively assert tag, text, tail, attributes, and exact child order."""
+    """Recursively assert tag, text, tail, attributes, and exact child order.
+
+    Newline-bearing, whitespace-only text/tails are treated as insignificant
+    indentation. Every other difference is compared exactly, so a lost space
+    inside mixed inline content (``<italic>x</italic> y``) is still detected.
+    """
     assert node_a.tag == node_b.tag, f"Tag mismatch: {node_a.tag} != {node_b.tag}"
     assert node_a.attrib == node_b.attrib, f"Attribute mismatch at {node_a.tag}: {node_a.attrib} != {node_b.attrib}"
 
     def norm(val: str | None) -> str:
-        return "" if val is None else val.strip()
+        if val is None:
+            return ""
+        # Pretty-print indentation always contains a newline. A plain space or
+        # tab is meaningful inline spacing and must not be normalized away.
+        if not val.strip() and "\n" in val:
+            return ""
+        return val
 
     assert norm(node_a.text) == norm(node_b.text), f"Text mismatch at {node_a.tag}: {repr(node_a.text)} != {repr(node_b.text)}"
     assert norm(node_a.tail) == norm(node_b.tail), f"Tail mismatch at {node_a.tag}: {repr(node_a.tail)} != {repr(node_b.tail)}"
@@ -152,3 +163,38 @@ def test_mixed_content_inline_preservation(tmp_path: Path):
     title_orig = tree_orig.find(".//article-title")
     title_exp = tree_exported.find(".//article-title")
     assert_structural_equality(title_orig, title_exp)
+
+
+def test_comparator_rejects_leading_space_change():
+    with pytest.raises(AssertionError):
+        assert_structural_equality(etree.fromstring("<r><p>text</p></r>"),
+                                   etree.fromstring("<r><p> text</p></r>"))
+
+
+def test_comparator_rejects_lost_inline_tail_space():
+    with pytest.raises(AssertionError):
+        assert_structural_equality(etree.fromstring("<r><p><italic>x</italic> y</p></r>"),
+                                   etree.fromstring("<r><p><italic>x</italic>y</p></r>"))
+
+
+def test_comparator_rejects_internal_space_change():
+    with pytest.raises(AssertionError):
+        assert_structural_equality(etree.fromstring("<r><p>a b</p></r>"),
+                                   etree.fromstring("<r><p>a  b</p></r>"))
+
+
+def test_comparator_rejects_changed_comment():
+    with pytest.raises(AssertionError):
+        assert_structural_equality(etree.fromstring("<r><p>x</p><!--reviewed--></r>"),
+                                   etree.fromstring("<r><p>x</p><!--approved--></r>"))
+
+
+def test_comparator_rejects_added_processing_instruction():
+    with pytest.raises(AssertionError):
+        assert_structural_equality(etree.fromstring("<r><p>x</p></r>"),
+                                   etree.fromstring("<r><?review keep?><p>x</p></r>"))
+
+
+def test_comparator_ignores_newline_indentation_only():
+    assert_structural_equality(etree.fromstring("<r><p>x</p></r>"),
+                               etree.fromstring("<r>\n  <p>x</p>\n</r>"))

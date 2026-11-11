@@ -1,126 +1,130 @@
 # Remediation plan (Phase 2 onward)
 
-Snapshot: **2026-11-10 14:45**. This plan is based on `00_baseline_report.md` and `01_code_audit.md`. **No production logic was changed in Phases 0–1.** The working tree already contains earlier Phase 2/3 work plus concurrent title/alternate-name edits; this plan does not redo them and does not assume they are committed.
+Snapshot: **2026-11-11 09:00 (SLST)**, commit **`612f395`**, clean tree. Based on `00_baseline_report.md` and `01_code_audit.md`. **No production or test logic was changed in Phases 0–1.**
 
-## Current state to account for
+## Current state
 
-- The XML validation/revision/export work described in `phase_02_implementation.md` and `phase_03_implementation.md` is **already implemented in the working tree** (uncommitted). Focused suites pass: 36 `test_xml_validation_export.py`, 15 `test_xml_revision_integrity.py`, plus comment/session/draft tests.
-- The tree also contains concurrent uncommitted bilingual/alternate-name/country/title-language work that appeared during the audit. Treat it as a separate change set.
-- Therefore the next approved phase should **not** start by re-implementing Phase 2. It should first stabilize the uncommitted work, then fix the P1 lifecycle/CLI blockers, then harden tests.
+- The suite is **green**: 590 passed in ~21 s under offscreen Qt, no skips, no hangs.
+- The previous P1 blockers (C01–C04) and C05/C06 are **fixed and covered**.
+- The XML validation/revision work is committed, not uncommitted. It should be left intact.
+- Open findings are engineering, fidelity, and readiness gaps: C07, C08, C09, C10, C11, C12, plus new N01, N02, N03.
+- There is still no authoritative publisher schema, so **no plan step may claim schema validity** without C11.
 
-Recommended gate order: **stabilize → P1 blockers → test infrastructure → hardening → performance/accuracy → architecture → packaging**. Do not start performance or refactoring work before C01–C04 and C06/C12 are closed.
+Recommended gate order:
 
----
+**1. Trustworthy test gate → 2. Scientific fidelity decisions → 3. GUI/LLM reliability → 4. Schema readiness → 5. Cleanup/packaging → later phases.**
 
-## Work package 0 — Stabilize the current uncommitted change sets (approval gate)
-
-**Goal:** a reviewable, committed baseline before remediation touches behavior.
-
-1. Review and commit the existing Phase 2/3 XML changes as their own commit/PR.
-2. Review and commit the concurrent alternate-name/title-language changes separately.
-3. Confirm the full suite can be run with the documented headless command; record the three known hangs and two known failures as explicit xfails/skips **only if** work package 2 will fix them in the same release, otherwise leave them visible.
-
-**Acceptance:** clean separation of change sets; `git status` shows only intentional files; the documented baseline command and its result are reproducible.
-
-**Do not:** rewrite the Phase 2/3 XML code, change the ANI namespace, or alter schema/validation semantics while stabilizing.
+Do not start architectural refactoring or performance work before the test gate and fidelity decisions are settled.
 
 ---
 
-## Work package 1 (P1) — Headless conversion contract and load lifecycle
+## Work package 1 (P2) — Make the regression gate trustworthy
 
-**Findings:** C01, C02, C03, C04.
+**Findings:** C07, C12.
 
-**Goal:** batch conversion never writes the wrong article, never blocks on a dialog, and never reports success with zero output.
+**Why first:** a green suite is only useful if it can detect the changes it claims to detect and can fail fast instead of hanging.
 
-**Design:** introduce a conversion-facing load/export result that is independent of `QMessageBox`.
+1. Make `assert_structural_equality` compare exact `text`/`tail` by default, or introduce a separately named canonicalizer for documented insignificant indentation. Keep comment/PI comparison (it already works) and state precisely what is normalized.
+2. Add comparator mutation tests: changed leading space, changed tail, changed comment, changed PI must each fail; the unchanged golden must pass.
+3. Add `pytest-timeout` and a `gui` marker boundary that is actually enforced.
+4. Add `.github/workflows/` running `QT_QPA_PLATFORM=offscreen python -m pytest -q` with a hard timeout and a Python/PySide6 matrix.
+5. Untrack `*.pyc`, `node_modules/`, and `.bench/`; extend `.gitignore` (`__pycache__/`, `*.pyc`, `.pytest_cache/`, `node_modules/`, `.bench/`, `.test-alt-review-*`). Do not delete `node_modules/` from the working tree unless the JavaScript dependency is confirmed unused and removed from `package.json`.
+6. Add `pyproject.toml` (project metadata + `test` extra: `pytest`, `pytest-qt`, `pytest-timeout`) and a README with the documented headless command and supported Python/Qt versions.
 
-- `LoadResult` (success, document, source path, generation, typed error) returned by `_load_pdf_path`/the worker completion path; `Converter` consumes it instead of inspecting `window.document`.
-- Transactional failure: on error, clear document, source path, viewer payload, article state, selection, and draft baseline for that load; reset generation.
-- Explicit export result from `run_auto_pipeline` (`written_paths`, `skipped_reason`); `Converter.convert` requires at least one written path.
-- Dialog policy injected into the window (`interactive`/`headless`) or moved to a GUI adapter that the conversion path does not import.
-- Seed the draft baseline on successful load, or replace JSON comparison with explicit dirty tracking reset on load/save/open, so a load with no edits is clean.
+**Acceptance:** comparator mutation tests pass; a deliberate `time.sleep` test fails via timeout; CI is green on a clean checkout; `git ls-files` contains no `.pyc` or `node_modules` entries.
 
-**Likely files:** `pdf_to_jats/gui/main_window.py` (`_load_pdf_path`, `_on_pdf_load_complete`, `run_auto_pipeline`, `closeEvent`), `pdf_to_jats/gui/article_drafts.py` (`_workspace_text`, `confirm_close_drafts`), `pdf_to_jats/cli.py` (`Converter.convert`, `main`). Prefer minimal extraction over a new architecture layer in this package.
-
-**Tests (must fail before, pass after):**
-
-- `test_failed_load_clears_previous_document` (C01).
-- `test_cli_corrupt_pdf_returns_nonzero_without_dialog` (C01/C03).
-- `test_close_after_load_does_not_prompt`, `test_second_pdf_does_not_prompt_without_edits` (C02).
-- `test_batch_two_pdfs_completes` (C02).
-- Existing `test_cli_converter_end_to_end`, `test_cli_main_exit_codes`, `test_load_pdf_path_wait_parameter_completes_extraction`, `test_article_finish_drops_stale_response_on_generation_mismatch` must pass in a normal, non-deselected run (C02/C04).
-- `test_cli_no_article_is_failure` (C04).
-
-**Acceptance:** full suite terminates without deselection or dialog stubs; batch of two valid PDFs produces two XML files; corrupt PDF produces nonzero exit and no XML; closing after a mere load never prompts.
-
-**Risk:** draft-save semantics are user-visible. Headless mode must define what happens to genuinely unsaved edits (default: fail the batch with a clear message; never silently discard without an explicit flag).
+**Risk:** removing `node_modules` from Git is safe for the Python app but may surprise Node tooling; keep the directory locally and confirm with the owner before deleting `package.json`.
 
 ---
 
-## Work package 2 (P2) — Test infrastructure and golden fidelity
+## Work package 2 (P2) — Scientific fidelity decisions
 
-**Findings:** C06, C07, C12 (and prerequisite for C05 coverage).
+**Findings:** N01, N02.
 
-1. Fix `tests/test_golden_structural.py` to supply required `bbox`; decide the intended `PDFViewer` visibility API and either implement it deliberately or rewrite `tests/test_process_lifecycle.py` against the real render API. Do not add a no-op method to satisfy a test.
-2. Make the structural comparator exact by default; compare all XPath nodes including comments/PIs; add mutation tests that prove it rejects a changed space, tail, comment, and PI.
-3. Add `pytest-timeout` and a `gui` marker; add CI (headless Qt, Python matrix, timeout). Stop tracking `.pyc` and `node_modules`; add `pyproject.toml` test extras and a README with the documented command.
+**Why early:** both change exported scientific content/metadata, so they need an explicit product decision and fixtures before any refactor touches the generator.
 
-**Acceptance:** `QT_QPA_PLATFORM=offscreen python -m pytest -q` terminates; a deliberately hanging test fails via timeout; comparator mutation tests pass; CI green on the stabilized baseline.
+1. **N01:** decide whether non-English titles must lose `sup`/`sub`/`inf`. The current code unwraps them for every non-English language, including French/German/Spanish, where they are meaningful. Preferred: preserve markup and let schema validation report incompatibility; fallback: restrict to a documented subset and document the semantic loss. In either case, add fixtures for a Latin-script chemical formula and a CJK footnote marker.
+2. **N02:** extend the alias table for UK constituent countries (`England`, `Scotland`, `Wales`, `Northern Ireland` → `GBR`), tolerate a leading “The”, and decide the policy for common exonyms (`Deutschland`). Keep hard failure only for genuinely unknown values; consider a review warning instead of blocking validated export.
 
----
+**Acceptance:** the chosen behavior is asserted by tests and stated in `docs/xml_export.md`; no text is lost; the country probe cases from `01_code_audit.md` are covered by tests.
 
-## Work package 3 (P2) — Shutdown/lifecycle safety
-
-**Finding:** C05.
-
-- Rework `PDFViewer.cleanup` so live threads/workers stay owned until `finished`, or use a bounded wait that is verified and logged on timeout.
-- Add a slow-render close test using a fake worker; assert no thread is destroyed while running.
-- Depends on work package 2 fixing the lifecycle test API.
-
-**Acceptance:** close during rasterization exits cleanly under the stress test; no `QThread: Destroyed while thread is still running` warning/crash.
+**Risk:** N01 changes output for existing drafts that were regenerated; do not retroactively rewrite corrected user XML. Apply the decision only on generation/validation, and record it as a documented behavior change.
 
 ---
 
-## Work package 4 (P2) — GUI responsiveness, secrets, and error semantics
+## Work package 3 (P2) — GUI responsiveness, typed errors, secrets
 
-**Findings:** C08, C09, C10.
+**Findings:** C08, C10, C09.
 
-- Move `classify_selected_blocks` off the GUI thread using the existing worker pattern; disable the action while running; add a fake-client responsiveness test.
-- Prefer `OPENROUTER_API_KEY`; remove or gate the plaintext writer, restrict permissions, redact keys in logs; add a config/redaction test.
-- Introduce typed LLM errors; catch only expected transport/parse failures; log unexpected exceptions with stack traces; keep heuristic fallback only for explicit unavailability and label its provenance.
-- Add an error-injection test proving a programmer error is not silently converted into a heuristic result.
+1. Move `classify_selected_blocks` onto the existing `_ArticleFinishWorker` pattern (or a `QThreadPool` task). Disable the Classify action while running; emit typed success/error; keep the heuristic fallback only for explicit unavailability and label its provenance.
+2. Introduce typed LLM errors (`LLMUnavailable`, `LLMRateLimited`, `LLMResponseError`). Catch those at the UI boundary; log unexpected exceptions with `exc_info=True`; do not convert programmer errors into heuristic assignments.
+3. Prefer `OPENROUTER_API_KEY`; remove or explicitly gate `save_openrouter_settings`; restrict file permissions if retained; redact keys from logs/errors.
 
-**Acceptance:** no synchronous network call remains in a GUI-thread slot; no plaintext key write without explicit opt-in; unexpected errors are visible in logs/tests.
+**Acceptance:** no synchronous network call remains in a GUI-thread slot; a fake `TypeError` from the client surfaces as an internal error, not “unavailable”; no plaintext key is written without explicit opt-in; redaction test passes.
+
+**Risk:** classification fallback behavior is user-visible. Keep the local-first / OpenRouter-fallback order and do not change role-assignment semantics in this package.
 
 ---
 
-## Work package 5 (P2) — Schema readiness
+## Work package 4 (P2) — Schema readiness
 
 **Finding:** C11.
 
-- Obtain the authoritative Elsevier ANI/CAR schema with redistribution terms; pin it under `pdf_to_jats/schemas/` with provenance/checksum; add CI valid/invalid fixture tests.
-- If redistribution is not permitted, require an explicit local schema profile for validated export, document it, and keep `SCHEMA_UNAVAILABLE` truthful.
+- Obtain the authoritative Elsevier ANI/CAR schema with redistribution terms; pin it under `pdf_to_jats/schemas/` with provenance and a checksum; add known-good and known-bad fixtures to CI.
+- If redistribution is not permitted, keep the current explicit user-selected local profile, document it prominently, and never claim publisher validity.
+- Use the pinned schema to resolve R09 (title ordering/`original` semantics) and N01 (whether scripts are allowed in `titletext`).
 
-**Acceptance:** CI proves `SCHEMA_VALID`/`SCHEMA_INVALID` against a pinned schema, or the product explicitly requires a user-supplied schema and never claims validity. **No report may claim schema validity without this.**
+**Acceptance:** CI proves `SCHEMA_VALID` and `SCHEMA_INVALID` against a pinned schema, or the product explicitly requires a user-supplied schema and every report says so.
+
+**Risk:** a publisher schema is a licensing artifact; do not invent or approximate one.
 
 ---
 
-## Later phases (align with the master plan)
+## Work package 5 (P3) — Cleanup and documentation integrity
 
-- **Phase 4 — regression/integration tests:** corpus-driven extraction/layout tests (R01), malformed draft/revision tests (R03), recorded LLM/GROBID contract tests (R04). Use licensed or synthetic PDFs only.
-- **Phase 5 — architecture/reliability:** extract a conversion service from `MainWindow`; centralize dialogs, worker lifecycles, and error types. Do not rewrite working XML/GUI components.
-- **Phase 6 — performance:** benchmark before optimizing (R02). Measure cold/warm load, pages/min, peak RSS, and raster behavior; only then consider caching/shared raster services or the 3× matrix.
+**Findings:** N03, stale audit artifacts.
+
+1. Delete `MainWindow._auto_classify` or wire it deliberately and share one implementation with `classify_selected_blocks`.
+2. Regenerate `docs/audit/collection_results.txt` (it currently records 452 tests from 2026-11-09) and refresh `dependency_versions.txt` or label it as a dated inventory.
+3. Keep the audit documents consistent with the code; do not commit a report that describes a baseline the tree no longer has.
+
+**Acceptance:** no unreachable duplicate classification path; audit evidence matches `pytest --collect-only`; version inventory is dated and accurate.
+
+---
+
+## Later phases (per the master plan)
+
+- **Phase 4 — regression/integration tests:** licensed corpus-driven extraction/layout tests (R01), malformed draft/revision fuzz tests (R03), recorded LLM/GROBID contract tests (R04). No live API calls in unit tests.
+- **Phase 5 — architecture:** extract a conversion/session service from `MainWindow` (7,617 lines). Start with load/export orchestration and a single session-reset object replacing the ad-hoc reset lists in C01. Do not rewrite working XML/GUI components; preserve shortcuts, signals, and conversion behavior.
+- **Phase 6 — performance:** benchmark before optimizing (R02). Measure cold/warm load, pages/min, peak RSS, raster behavior; only then consider caching or a shared raster service.
 - **Phase 7 — failure recovery:** disk-full, permission-denied, interrupted write, schema-missing, and crash-recovery tests; verify atomic publication and draft restore.
-- **Phase 8 — packaging/CI:** declared dependencies, lock/constraints, headless CI, artifact cleanup, and release checklist.
+- **Phase 8 — packaging:** lock/constraints, optional-dependency split (Docling), supported Python range (currently 3.14 is used but `requirements.txt` states no upper bound), reproducible install, release checklist.
 
 ---
 
 ## Suggested first approved step
 
-**Work package 1 only**, plus the minimal test fixes needed to run it (the existing CLI tests and the two stale-API tests). That closes all four P1 blockers and turns the suite from “hangs/red” into a usable gate. Work packages 2–5 follow in separate approvals.
+**Work package 1 only**, plus the N03 deletion if desired. It is low-risk, does not touch scientific output, and converts the currently green-but-ungated suite into a gate that can detect whitespace/markup regressions and fail fast on hangs. Work package 2 follows separately because it requires a product decision about scientific markup.
 
 ## Constraints carried forward
 
-- No rebuild, no dependency replacement, no schema invented, no test weakened to pass.
-- Preserve: secure XML parsing, atomic writes, revision fingerprints, draft/validated separation, mixed-content and encoding handling, generation guards, network-denial test fixture.
-- Every fix must include the listed regression test; every claim must be executed, not inferred.
+- No rebuild, no dependency replacement, no invented schema, no test weakened to pass.
+- Preserve secure XML parsing, atomic writes, revision fingerprints, draft/validated separation, mixed-content and encoding handling, generation guards, and the network-denial fixture.
+- Never silently discard user XML corrections.
+- Every fix needs the listed regression test; every claim must be executed, not inferred.
+
+---
+
+## Execution update (end of audit)
+
+This plan was executed in the approved follow-up pass. Final state is recorded in `05_final_engineering_review.md`.
+
+| Work package | Outcome |
+|---|---|
+| WP1 — trustworthy test gate | **Done.** Exact comparator semantics with newline-indentation normalization; 6 mutation tests; `pytest-timeout` (180 s); Windows CI; `pyproject.toml`; README; extended `.gitignore`; 237 `.pyc` and 2,565 `node_modules` entries untracked (working files intact). The `gui` marker boundary was not introduced. |
+| WP2 — scientific fidelity | **Partially done.** N02 fixed (UK constituent countries, `Deutschland`, leading “The”) with 9 tests. **N01 deferred**: it requires an authoritative schema or an explicit product decision; no silent change was made. |
+| WP3 — GUI/LLM reliability | **Partially done.** C09 writer is opt-in and permission-restricted; API-key/bearer log redaction added with tests. **C08 and C10 deferred** to a dedicated change set (worker extraction and typed error hierarchy). |
+| WP4 — schema readiness | **Not actionable here.** Requires the licensed Elsevier ANI/CAR XSD (C11). No schema was invented; no validity claim is made. |
+| WP5 — cleanup/docs | **Done.** `_auto_classify` removed; `collection_results.txt` regenerated; audit evidence reconciled with the code. |
+
+Remaining order: **C08 → C10 → N01 decision → C11 schema → corpus (R01) → incremental architecture extraction.**

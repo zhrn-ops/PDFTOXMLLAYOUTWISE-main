@@ -52,16 +52,26 @@ def load_config() -> AppConfig:
     return config
 
 
-def save_openrouter_settings(config: AppConfig) -> None:
-    """Persist OpenRouter settings for GUI-driven runs."""
+def save_openrouter_settings(config: AppConfig, *, include_api_key: bool = False) -> None:
+    """Persist non-secret OpenRouter settings for GUI-driven runs.
+
+    The API key is only written when a caller explicitly opts in. Prefer the
+    ``OPENROUTER_API_KEY`` environment variable; a plaintext file key is not
+    written by default.
+    """
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     settings = {
         "model": config.openrouter_model,
         "fallback_models": config.openrouter_fallback_models,
-        "api_key": config.openrouter_api_key,
     }
-    config.openrouter_settings_path.write_text(
-        json.dumps(settings, indent=2),
-        encoding="utf-8",
-    )
+    if include_api_key and config.openrouter_api_key:
+        settings["api_key"] = config.openrouter_api_key
+    path = config.openrouter_settings_path
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    if include_api_key:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            # Windows ACLs do not map to POSIX modes; the caller opted in.
+            pass

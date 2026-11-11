@@ -1,3 +1,25 @@
+# Generated output and secrets
 output/
 .env
-.env
+
+# Python build artifacts and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.audit_tmp/
+.bench/tmp/
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+p313/
+p314/
+
+# Installed JavaScript packages (package.json/package-lock.json stay tracked)
+node_modules/
+
+# Transient audit/test workspaces
+.test-alt-review-*/

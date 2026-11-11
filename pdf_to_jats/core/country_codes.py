@@ -18,12 +18,14 @@ for _row in COUNTRIES:
 _ALIASES = {
     'IRN': ['Islamic Republic of Iran', 'Iran (Islamic Republic of)'],
     'USA': ['United States of America', 'U.S.A.', 'U.S.'],
-    'GBR': ['UK', 'U.K.', 'Great Britain', 'United Kingdom of Great Britain and Northern Ireland'],
+    'GBR': ['UK', 'U.K.', 'Great Britain', 'United Kingdom of Great Britain and Northern Ireland',
+            'England', 'Scotland', 'Wales', 'Northern Ireland'],
     'KOR': ['Republic of Korea', 'Korea, Republic of'],
     'PRK': ["Democratic People’s Republic of Korea", "Korea, Democratic People's Republic of"],
     'CHN': ["People’s Republic of China", 'PR China', 'P.R. China'],
     'RUS': ['Russia'], 'VNM': ['Vietnam'], 'CZE': ['Czech Republic'],
     'TUR': ['Türkiye'], 'SWZ': ['Eswatini'], 'LBY': ['Libya'],
+    'DEU': ['Deutschland'], 'NLD': ['The Netherlands'],
     'CPV': ['Cabo Verde'], 'CIV': ['Ivory Coast'],
     'COD': ['Democratic Republic of the Congo', 'DR Congo', 'DRC', 'Congo (Kinshasa)'],
     'COG': ['Republic of the Congo', 'Congo (Brazzaville)'],
@@ -40,7 +42,10 @@ for _code, _names in _ALIASES.items():
 
 
 def country_code(value, *, funding=False):
-    code = _LOOKUP.get(_key(value), '')
+    key = _key(value)
+    code = _LOOKUP.get(key, '')
+    if not code and key.startswith('the'):
+        code = _LOOKUP.get(key[3:], '')
     return code if code != 'EUE' or funding else ''
 
 
