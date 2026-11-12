@@ -594,9 +594,9 @@ class JATSGenerator:
                 parent.text = (parent.text or "") + segment
             else:
                 previous.tail = (previous.tail or "") + segment
-            # Elsevier ANI schema uses <ce:sup> and <ce:inf> (inferior), not <ce:sub>
+            # Script wrappers use the default ANI namespace without a ce: prefix.
             tag_name = "inf" if kind == "sub" else "sup"
-            element = etree.SubElement(parent, self._qname(tag_name, self.CE_NS))
+            element = etree.SubElement(parent, self._qname(tag_name))
             element.text = text[start:end]
             previous = element
             cursor = end

@@ -28,8 +28,8 @@ def _min_window() -> MainWindow:
     return window
 
 
-def test_jats_generator_emits_ce_sup_and_ce_inf_for_title_and_abstract(tmp_path: Path):
-    """Verify that title and abstract output valid <ce:sup> and <ce:inf> elements."""
+def test_jats_generator_emits_sup_and_inf_for_title_and_abstract(tmp_path: Path):
+    """Verify that title and abstract output valid <sup> and <inf> elements."""
     doc = Document(
         title="Study on H2O and CO2 dynamics",
         abstract="Concentration was 10-3 mol/L and Ca2+ ions were monitored.",
@@ -48,13 +48,15 @@ def test_jats_generator_emits_ce_sup_and_ce_inf_for_title_and_abstract(tmp_path:
     output_path = tmp_path / "test_article.xml"
     JATSGenerator().generate(doc, output_path)
 
+    xml = output_path.read_text(encoding="utf-8")
+    assert "<ce:inf>" not in xml and "<ce:sup>" not in xml
     tree = etree.parse(str(output_path))
     root = tree.getroot()
 
     # Check titletext
     titletext = root.find(f".//{{{ANI_NS}}}titletext")
     assert titletext is not None
-    infs = titletext.findall(f"{{{CE_NS}}}inf")
+    infs = titletext.findall(f"{{{ANI_NS}}}inf")
     assert len(infs) == 2
     assert infs[0].text == "2"
     assert infs[1].text == "2"
@@ -63,7 +65,7 @@ def test_jats_generator_emits_ce_sup_and_ce_inf_for_title_and_abstract(tmp_path:
     # Check abstract para
     para = root.find(f".//{{{ANI_NS}}}abstract/{{{CE_NS}}}para")
     assert para is not None
-    sups = para.findall(f"{{{CE_NS}}}sup")
+    sups = para.findall(f"{{{ANI_NS}}}sup")
     assert len(sups) == 2
     assert sups[0].text == "-3"
     assert sups[1].text == "2+"
@@ -88,7 +90,7 @@ def test_jats_generator_self_heals_title_offset_drift(tmp_path: Path):
     tree = etree.parse(str(output_path))
     titletext = tree.find(f".//{{{ANI_NS}}}titletext")
     assert titletext is not None
-    inf = titletext.find(f"{{{CE_NS}}}inf")
+    inf = titletext.find(f"{{{ANI_NS}}}inf")
     assert inf is not None
     assert inf.text == "2"
 

@@ -199,19 +199,19 @@ def test_alphabetic_subscript_and_superscript_preserved_in_ani_xml(tmp_path: Pat
     tree = etree.parse(str(out_file))
     root = tree.getroot()
 
-    # Title check: V<ce:inf>max</ce:inf> and K<ce:inf>m</ce:inf>
+    # Title check: V<inf>max</inf> and K<inf>m</inf>
     titletext = root.find(f".//{{{ANI_NS}}}titletext")
     assert titletext is not None
-    infs = titletext.findall(f"{{{CE_NS}}}inf")
+    infs = titletext.findall(f"{{{ANI_NS}}}inf")
     assert len(infs) == 2
     assert infs[0].text == "max"
     assert infs[1].text == "m"
 
-    # Abstract check: k<ce:inf>a</ce:inf>, α<ce:inf>A</ce:inf>, and Ca<ce:sup>2+</ce:sup>
+    # Abstract check: k<inf>a</inf>, α<inf>A</inf>, and Ca<sup>2+</sup>
     para = root.find(f".//{{{ANI_NS}}}abstract/{{{CE_NS}}}para")
     assert para is not None
-    abs_infs = para.findall(f"{{{CE_NS}}}inf")
-    abs_sups = para.findall(f"{{{CE_NS}}}sup")
+    abs_infs = para.findall(f"{{{ANI_NS}}}inf")
+    abs_sups = para.findall(f"{{{ANI_NS}}}sup")
     assert len(abs_infs) == 2
     assert abs_infs[0].text == "a"
     assert abs_infs[1].text == "A"
@@ -236,7 +236,7 @@ def test_alphabetic_script_runs_without_explicit_source_default_to_manual(tmp_pa
     tree = etree.parse(str(out_file))
     titletext = tree.find(f".//{{{ANI_NS}}}titletext")
     assert titletext is not None
-    infs = titletext.findall(f"{{{CE_NS}}}inf")
+    infs = titletext.findall(f"{{{ANI_NS}}}inf")
     assert len(infs) == 2
     assert infs[0].text == "a"
     assert infs[1].text == "b"
@@ -258,7 +258,7 @@ def test_stale_alphabetic_offset_drift_is_dropped_not_relocated(tmp_path: Path):
     tree = etree.parse(str(out_file))
     titletext = tree.find(f".//{{{ANI_NS}}}titletext")
     assert titletext is not None
-    infs = titletext.findall(f"{{{CE_NS}}}inf")
+    infs = titletext.findall(f"{{{ANI_NS}}}inf")
     # Dropped because text[10:13] (' enzym') does not match expected ('max')
     assert len(infs) == 0
 

@@ -24,7 +24,7 @@ def test_generated_non_english_title_preserves_scripts(language):
     root = etree.fromstring(JATSGenerator().to_bytes(document))
     title = root.find('.//{http://www.elsevier.com/xml/ani/ani}titletext')
     assert ''.join(title.itertext()) == 'A2B'
-    assert title[0].tag == '{http://www.elsevier.com/xml/ani/common}sup'
+    assert title[0].tag == '{http://www.elsevier.com/xml/ani/ani}sup'
     assert title[0].text == '2'
 
 
@@ -49,6 +49,7 @@ def test_formatting_non_english_title_preserves_scientific_meaning():
     assert ''.join(s.title_node().itertext()) == 'H2O'
     assert s.title_node()[0].text == '2'
     assert s._local_name(s.title_node()[0]) == 'inf'
+    assert b'<inf>2</inf>' in s.xml_bytes()
 
 
 def test_changing_english_title_language_preserves_scripts():

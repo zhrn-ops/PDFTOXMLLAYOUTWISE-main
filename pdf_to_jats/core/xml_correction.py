@@ -24,6 +24,7 @@ from pdf_to_jats.core.inline_script_detector import (
     preserve_matching_runs,
 )
 
+ANI_NS = "http://www.elsevier.com/xml/ani/ani"
 ANI_CE_NS = "http://www.elsevier.com/xml/ani/common"
 
 _PARAGRAPH_BREAK = re.compile(r"[ \t]*(?:\r?\n[ \t]*){2,}")
@@ -761,7 +762,7 @@ class XmlDocumentSession:
                     for lo, hi in ((a, min(b, left)), (max(a, right), b)):
                         if lo < hi:
                             preserved.append(dict(run, start=lo, end=hi, text=value[lo:hi]))
-                ns = ANI_CE_NS if self.profile == "ANI" else etree.QName(target).namespace
+                ns = ANI_NS if self.profile == "ANI" else etree.QName(target).namespace
                 if tag != "normal":
                     preserved.append({"start": left, "end": right, "text": value[left:right],
                                       "type": "sup" if tag == "sup" else "sub",
@@ -959,7 +960,7 @@ class XmlDocumentSession:
         """Replace field contents while preserving only verified script runs."""
 
         namespace = etree.QName(node).namespace
-        default_namespace = ANI_CE_NS if self.profile == "ANI" else namespace
+        default_namespace = ANI_NS if self.profile == "ANI" else namespace
         valid = []
         for run in runs:
             try:
