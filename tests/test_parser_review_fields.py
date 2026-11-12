@@ -10,7 +10,7 @@ from pdf_to_jats.models.affiliation import Affiliation
 from pdf_to_jats.models.document import Document
 
 
-def test_explicit_corresponding_author_clears_only_fallback_warning(qapp):
+def test_explicit_corresponding_author_review_requires_acknowledgment(qapp, tmp_path):
     author = Author(id='author_1', surname='Smith', affiliation_ids=['1'])
     affiliation = Affiliation(id='1', text='University')
     warning = 'No corresponding author was matched explicitly; used the first author. Review correspondence.'
@@ -21,14 +21,18 @@ def test_explicit_corresponding_author_clears_only_fallback_warning(qapp):
     xml = JATSGenerator().to_string(Document(authors=[author], affiliations=[affiliation]))
     window = XmlCorrectionWindow()
     try:
-        assert window.load_xml_text(xml, Path('correspondence-review.xml'))
+        assert window.load_xml_text(xml, tmp_path / 'correspondence-review.xml')
         window.set_parser_issues(linked)
         key = window._draft_key
         item = next(window.author_list.item(i) for i in range(window.author_list.count())
                     if window.author_list.item(i).data(Qt.UserRole) is not None)
         window.make_corresponding_author(item)
         record = window._drafts[key]
-        assert [issue['message'] for issue in record['parser_issues']] == ['Review organization']
+        issue = record['parser_issues'][0]
+        assert issue['status'] == 'PENDING'
+        window._resolve_parser_review(issue, 'PASSED', 'Reviewer', 'Checked against PDF')
+        record = window._drafts[key]
+        assert [i['message'] for i in record['parser_issues'] if i['status'] == 'PENDING'] == ['Review organization']
         assert warning not in record['parser_warnings']
         assert all(warning not in window.author_list.item(i).text()
                    for i in range(window.author_list.count()))
@@ -41,7 +45,7 @@ def test_explicit_corresponding_author_clears_only_fallback_warning(qapp):
         window.deleteLater()
 
 
-def test_parser_notes_clear_when_their_targets_are_corrected(qapp):
+def test_parser_notes_clear_when_corrections_are_confirmed(qapp, tmp_path):
     author = Author(id='author_1', surname='Smith', affiliation_ids=['1'])
     affiliation = Affiliation(id='1', text='University 1')
     linked = LinkedAuthors([author], [affiliation], issues=[
@@ -51,7 +55,7 @@ def test_parser_notes_clear_when_their_targets_are_corrected(qapp):
     xml = JATSGenerator().to_string(Document(authors=[author], affiliations=[affiliation]))
     window = XmlCorrectionWindow()
     try:
-        assert window.load_xml_text(xml, Path('clear-review.xml'))
+        assert window.load_xml_text(xml, tmp_path / 'clear-review.xml')
         key = window._draft_key
         window.set_parser_issues(linked)
         heading = next(window.author_list.item(i) for i in range(window.author_list.count())
@@ -63,8 +67,10 @@ def test_parser_notes_clear_when_their_targets_are_corrected(qapp):
         values['surname'] = 'Jones'
         assert window.session.set_author_form(0, values)
         window._refresh()
-        assert [issue['message'] for issue in window._drafts[key]['parser_issues']] == [
-            'Review organization']
+        issue = window._drafts[key]['parser_issues'][0]
+        assert issue['status'] == 'PENDING'
+        window._resolve_parser_review(issue, 'FIXED', 'Reviewer', 'Correction checked against PDF')
+        assert [i['message'] for i in window._drafts[key]['parser_issues'] if i['status'] == 'PENDING'] == ['Review organization']
         assert 'Review surname' not in window._drafts[key]['parser_warnings']
 
         node = window.session.affiliation_groups()[0][2][0]
@@ -72,7 +78,11 @@ def test_parser_notes_clear_when_their_targets_are_corrected(qapp):
         values['organization'] = 'University 2'
         assert window.session.set_affiliation_form(node, values)
         window._refresh()
-        assert window._drafts[key]['parser_issues'] == []
+        # Changing the affiliation invalidates the earlier author acceptance.
+        for issue in window._drafts[key]['parser_issues']:
+            if issue['status'] == 'PENDING':
+                window._resolve_parser_review(issue, 'FIXED', 'Reviewer', 'Correction checked against PDF')
+        assert all(i['status'] == 'FIXED' for i in window._drafts[key]['parser_issues'])
         assert window._drafts[key]['parser_warnings'] == []
         assert window.parser_review.isHidden()
         for index in range(window.author_list.count()):
@@ -115,5 +125,74 @@ def test_parser_notes_target_groups_and_survive_draft_switch(qapp):
         window.activate_draft(key)
         assert 'Review source selection' in window.parser_review.text()
         assert window._drafts[key]['parser_issues'][0]['author_seq'] == '1'
+    finally:
+        window.deleteLater()
+
+
+def test_review_log_persistence_reopening_and_failure(qapp, tmp_path, monkeypatch):
+    import json
+    import pytest
+    from pdf_to_jats.core.draft_workspace import stage_workspace
+    from pdf_to_jats.core.xml_validation import ExportMode
+    from PySide6.QtWidgets import QMessageBox
+
+    author = Author(id='author_1', surname='Smith', affiliation_ids=['1'])
+    affiliation = Affiliation(id='1', text='University')
+    linked = LinkedAuthors([author], [affiliation], issues=[
+        LinkIssue('warning', 'Check name against PDF', author_id='author_1')])
+    xml = JATSGenerator().to_string(Document(authors=[author], affiliations=[affiliation]))
+    window = XmlCorrectionWindow()
+    try:
+        window.load_xml_text(xml, tmp_path / 'article.xml')
+        window.set_parser_issues(linked)
+        issue = window._review_records()[0]
+        with pytest.raises(ValueError):
+            window._resolve_parser_review(issue, 'FIXED', 'Reviewer', 'Checked')
+        with pytest.raises(ValueError):
+            window._resolve_parser_review(issue, 'PASSED', '', 'Checked')
+        window._resolve_parser_review(issue, 'PASSED', 'Reviewer', 'Checked PDF', 'Name verified')
+        log = tmp_path / 'article_review_log.txt'
+        event = json.loads(log.read_text(encoding='utf-8'))
+        assert event['action'] == 'PASSED'
+        assert event['reviewer'] == 'Reviewer'
+        assert event['review_id'] == issue['review_id']
+        assert window.parser_review.isHidden()
+        workspace = stage_workspace(json.loads(window._workspace_text()))
+        retained = workspace['articles'][workspace['active']]
+        assert retained['parser_issues'][0]['status'] == 'PASSED'
+        assert retained['review_history'] == [event]
+        assert 'Check name against PDF' not in window.session.xml_text()
+
+        # An unrelated title change must not invalidate an author acceptance.
+        window.session.set_title('Unrelated title correction')
+        window._refresh()
+        assert issue['status'] == 'PASSED'
+        current_values = window._review_values(issue)
+        assert current_values == issue['resolved_values']
+        values = window.session.author_form(0)
+        values['surname'] = 'Jones'
+        window.session.set_author_form(0, values)
+        window._refresh()
+        assert issue['status'] == 'PENDING'
+        assert len(window._drafts[window._draft_key]['review_history']) == 1
+
+        original_open = Path.open
+        def failed_open(path, *args, **kwargs):
+            if path == log:
+                raise OSError('Disk unavailable')
+            return original_open(path, *args, **kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'open', failed_open)
+            with pytest.raises(OSError):
+                window._resolve_parser_review(issue, 'FIXED', 'Reviewer', 'Checked correction')
+        assert issue['status'] == 'PENDING'
+        assert len(log.read_text(encoding='utf-8').splitlines()) == 1
+        monkeypatch.setattr(QMessageBox, 'warning', lambda *args: None)
+        monkeypatch.setattr(window, 'show_parser_reviews', lambda: None)
+        assert window.save_copy(mode=ExportMode.VALIDATED) is False
+        window._resolve_parser_review(issue, 'FIXED', 'Reviewer', 'Checked correction')
+        events = [json.loads(line) for line in log.read_text(encoding='utf-8').splitlines()]
+        assert [e['action'] for e in events] == ['PASSED', 'FIXED']
+        assert events[1]['previous_value'] != events[1]['updated_value']
     finally:
         window.deleteLater()

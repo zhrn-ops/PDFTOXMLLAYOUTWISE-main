@@ -23,6 +23,7 @@ from pdf_to_jats.core.language_codes import LANGUAGES, UNDETERMINED
 from pdf_to_jats.gui.pdf_viewer import PDFViewer
 from pdf_to_jats.gui.xml_code_editor import XmlCodeEditor
 from pdf_to_jats.gui.article_drafts import ArticleDrafts
+from pdf_to_jats.gui.parser_reviews import ParserReviews
 from pdf_to_jats.gui.styles import themed_style
 
 SCRIPT_COLORS = {"sup": "#78AAFF", "sub": "#FBBF24"}
@@ -149,7 +150,7 @@ def _script_legend() -> QLabel:
     return label
 
 
-class XmlCorrectionWindow(QWidget, ArticleDrafts):
+class XmlCorrectionWindow(QWidget, ArticleDrafts, ParserReviews):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("xmlCorrectionWorkspace")
@@ -277,6 +278,9 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self.parser_review.setStyleSheet('color: #dc4444;')
         self.parser_review.hide()
         author_layout.insertWidget(1, self.parser_review)
+        self.parser_reviews_button = QPushButton("Parser reviews and history")
+        self.parser_reviews_button.clicked.connect(self.show_parser_reviews)
+        author_layout.insertWidget(1, self.parser_reviews_button)
         self.review_duplicates = QPushButton('Review duplicate affiliations')
         self.review_duplicates.setObjectName('review_duplicate_affiliations')
         self.review_duplicates.clicked.connect(self.show_duplicate_affiliations)
@@ -707,10 +711,8 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
     def _parser_issue_targets(self) -> dict[str, str]:
         """Describe the authors and affiliation groups a parser note points at.
 
-        A note is resolved when its target is corrected, so the signature is
-        captured with the note and compared again on every refresh. Structural
-        changes (a moved author, a renamed or removed affiliation) invalidate
-        the note without the parser having to run again.
+        Signatures detect edits that a reviewer can confirm and invalidate
+        earlier acceptances when the affected information changes.
         """
         if not self.session:
             return {}
@@ -733,7 +735,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
             name = ' '.join(self.session.author_name(node).split())
             groups = ';'.join(f'{number}:{label}' for number, label
                               in sorted(author_groups.get(seq, [])))
-            signatures[f'author:{seq}'] = f'{name}::{groups}'
+            signatures[f'author:{seq}'] = f'{name}::{groups}::corresponding={node in self.session.correspondence()}'
         return signatures
 
     def _parser_affiliation_signature(self, node) -> str:
@@ -778,45 +780,13 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         self._refresh()
         self._retain_draft()
 
-    def _prune_parser_issues(self, record) -> None:
-        """Drop parser notes whose authors or affiliations have been corrected."""
-        issues = record.get('parser_issues', [])
-        if not issues:
-            return
-        current = self._parser_issue_targets()
-        kept = []
-        dropped = set()
-        for issue in issues:
-            targets = issue.get('targets')
-            if targets is None:
-                # Notes retained from an older draft lack a baseline signature;
-                # take one now so later corrections can clear them.
-                targets = {}
-                author_seq = issue.get('author_seq')
-                if author_seq is not None:
-                    key = f'author:{author_seq}'
-                    if key in current:
-                        targets[key] = current[key]
-                for seq in issue.get('group_seqs', []):
-                    key = f'group:{seq}'
-                    if key in current:
-                        targets[key] = current[key]
-                issue['targets'] = targets
-            if targets and any(current.get(key) != value for key, value in targets.items()):
-                dropped.add(issue.get('message'))
-            else:
-                kept.append(issue)
-        if not dropped:
-            return
-        record['parser_issues'] = kept
-        record['parser_warnings'] = [message for message in record.get('parser_warnings', [])
-                                     if message not in dropped]
-
     def _show_parser_issues(self) -> None:
         """Show diagnostics at their fields; never insert them into the XML."""
         record = self._drafts.get(self._draft_key, {})
         self._prune_parser_issues(record)
-        issues = record.get('parser_issues', [])
+        all_issues = record.get('parser_issues', [])
+        issues = [issue for issue in all_issues if issue.get('status', 'PENDING') == 'PENDING']
+        self.parser_reviews_button.setText(f'Parser reviews ({len(issues)} pending) and history')
         unmatched = []
         authors = self.session.authors()
         matched = set()
@@ -836,7 +806,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         if not issues:
             unmatched.extend(record.get('parser_warnings', []))
         notice = ('Parser review notes — check against the PDF; '
-                  'notes clear when their author or affiliation is corrected.')
+                  'use Parser reviews to pass a review or confirm a correction.')
         self.parser_review.setText('\n'.join([notice, *unmatched]) if issues or unmatched else '')
         self.parser_review.setVisible(bool(issues or unmatched))
         for row in range(self.author_list.count()):
@@ -1828,14 +1798,6 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
         try:
             self._record_history()
             self.session.set_corresponding_author(index)
-            # Explicit selection resolves only the parser's fallback choice;
-            # unrelated name, affiliation and correspondence notes remain.
-            record = self._drafts.get(self._draft_key, {})
-            fallback = 'No corresponding author was matched explicitly;'
-            record['parser_issues'] = [issue for issue in record.get('parser_issues', [])
-                                       if not issue.get('message', '').startswith(fallback)]
-            record['parser_warnings'] = [message for message in record.get('parser_warnings', [])
-                                         if not message.startswith(fallback)]
             self._refresh()
             for tab in range(self.tabs.count()):
                 if self.tabs.tabText(tab) == 'Corresponding Author':
@@ -1964,6 +1926,13 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts):
 
     def save_copy(self, *, mode: ExportMode = ExportMode.DRAFT) -> bool:
         if not self.session:
+            return False
+        self._prune_parser_issues(self._drafts.get(self._draft_key, {}))
+        if mode == ExportMode.VALIDATED and any(
+                issue['status'] == 'PENDING' for issue in self._review_records()):
+            QMessageBox.warning(self, 'Pending parser reviews',
+                                'Resolve all parser reviews before validated export. Draft export is still available.')
+            self.show_parser_reviews()
             return False
         self.validate()
         try:
