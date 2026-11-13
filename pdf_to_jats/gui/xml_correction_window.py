@@ -280,7 +280,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts, ParserReviews):
         author_layout.insertWidget(1, self.parser_review)
         self.parser_reviews_button = QPushButton("Parser reviews and history")
         self.parser_reviews_button.clicked.connect(self.show_parser_reviews)
-        author_layout.insertWidget(1, self.parser_reviews_button)
+        self.parser_reviews_button.hide()
         self.review_duplicates = QPushButton('Review duplicate affiliations')
         self.review_duplicates.setObjectName('review_duplicate_affiliations')
         self.review_duplicates.clicked.connect(self.show_duplicate_affiliations)
@@ -834,7 +834,7 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts, ParserReviews):
                                             else '\nReview: ' + message))
             else:
                 label = widget.layout().itemAt(0).widget()
-                label.setText(label.text() + '\nReview: ' + message)
+                label.setText(label.text() + '\nParser review pending (see group reviews)')
                 label.setWordWrap(True)
                 label.setStyleSheet('color: #ffb4b4;')
                 label.setToolTip(message)
@@ -938,6 +938,16 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts, ParserReviews):
             font = heading.font(); font.setBold(True); heading.setFont(font)
             highlight_duplicates(heading, nodes)
             self.author_list.addItem(heading)
+            review_row = QListWidgetItem()
+            self.author_list.addItem(review_row)
+            reviews = self._reviews_for_group(container, indices)
+            pending = sum(issue.get('status', 'PENDING') == 'PENDING' for issue in reviews)
+            review_button = QPushButton(f'Parser reviews ({pending} pending) and history')
+            review_button.setObjectName(f'parser_reviews_group_{number}')
+            review_button.clicked.connect(
+                lambda _checked=False, entries=reviews: self.show_parser_reviews(entries))
+            self.author_list.setItemWidget(review_row, review_button)
+            review_row.setSizeHint(review_button.sizeHint())
             if len(nodes) > 1:
                 for index, target in enumerate(nodes, 1):
                     add_affiliation_item(
@@ -965,6 +975,9 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts, ParserReviews):
                 name_label.setTextFormat(Qt.PlainText)
                 name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
                 row_layout.addWidget(name_label, 1)
+                assign = QPushButton('Assign affiliation')
+                assign.clicked.connect(lambda _checked=False, entry=item: self.assign_author_affiliation(entry))
+                row_layout.addWidget(assign)
                 for label, copy_author in [('Copy', True), ('Move', False), ('Corresponding', None)]:
                     button = QPushButton(label)
                     button.setFlat(True)
@@ -1805,6 +1818,45 @@ class XmlCorrectionWindow(QWidget, ArticleDrafts, ParserReviews):
                     break
         except ValueError as exc:
             QMessageBox.information(self, 'Cannot set corresponding author', str(exc))
+
+    def assign_author_affiliation(self, item) -> None:
+        index = item.data(Qt.UserRole)
+        if not self.session or index is None:
+            return
+        author = self.session.authors()[index]
+        destinations = [(f'Group {number}: {label}', container)
+                        for number, (label, _, _, container) in enumerate(self.session.affiliation_groups(), 1)
+                        if container is not None and self.session._local_name(container) == 'author-group'
+                        and container is not author.getparent()]
+        choices = [label for label, _ in destinations] + ['Create new affiliation group...']
+        label, accepted = QInputDialog.getItem(self, 'Assign affiliation', 'Affiliation group', choices, 0, False)
+        if not accepted:
+            return
+        try:
+            self._record_history()
+            if label == choices[-1]:
+                destination = self.session.add_author_group()
+                # add_author_group creates a blank author for manual editing.
+                # Assignment supplies a real author instead.
+                for child in list(destination):
+                    if self.session._local_name(child) == 'author':
+                        destination.remove(child)
+            else:
+                destination = next(node for text, node in destinations if text == label)
+            self.session.transfer_author(self.session.authors().index(author), destination, copy=False)
+            path = self.session.tree.getpath(destination)
+            self._refresh()
+            new_index = self.session.authors().index(author)
+            for row in range(self.author_list.count()):
+                entry = self.author_list.item(row)
+                if entry.data(Qt.UserRole) == new_index:
+                    self.author_list.setCurrentItem(entry)
+                    self.author_list.scrollToItem(entry)
+                    break
+            if label == choices[-1]:
+                self.edit_affiliation(path)
+        except ValueError as exc:
+            QMessageBox.information(self, 'Cannot assign affiliation', str(exc))
 
     def _transfer_author_row(self, item, *, copy: bool) -> None:
         self.author_list.setCurrentItem(item)

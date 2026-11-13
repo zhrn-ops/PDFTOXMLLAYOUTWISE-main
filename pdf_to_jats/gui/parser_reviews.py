@@ -80,7 +80,16 @@ class ParserReviews:
         self._refresh()
         self._retain_draft()
 
-    def show_parser_reviews(self):
+    def _reviews_for_group(self, container, indices):
+        authors = self.session.authors()
+        sequences = {authors[index].get('seq') for index in indices}
+        group_seq = container.get('seq') if container is not None else None
+        return [issue for issue in self._review_records()
+                if (issue.get('author_seq') and issue['author_seq'] in sequences)
+                or (group_seq and group_seq in issue.get('group_seqs', []))
+                or (not issue.get('author_seq') and not issue.get('group_seqs'))]
+
+    def show_parser_reviews(self, group_issues=None):
         if not self.session:
             return
         self._prune_parser_issues(self._drafts[self._draft_key])
@@ -110,7 +119,7 @@ class ParserReviews:
         fixed = QPushButton('Confirm correction — Fixed')
         layout.addWidget(passed)
         layout.addWidget(fixed)
-        issues = self._review_records()
+        issues = self._review_records() if group_issues is None or isinstance(group_issues, bool) else group_issues
 
         def selected():
             row = listing.currentRow()
